@@ -181,3 +181,50 @@ class ConfigWithCheck:
         if len(self.conf) > 0:
             invalid_key_lst = ",".join(list(self.conf.keys()))
             raise CChanException(f"invalid CChanConfig: {invalid_key_lst}", ErrCode.PARA_ERROR)
+
+
+# 代理配置，供程序运行时读取/更新
+# 默认为 None，首次运行时可由代码写回具体值
+PROXY = {'http': 'http://127.0.0.1:7890', 'https': 'http://127.0.0.1:7890'}
+
+
+def get_proxy():
+    """返回当前内存中的代理配置字典，格式 {'http': url, 'https': url}。"""
+    return PROXY
+
+
+def set_proxy(http: str, https: str = None, persist: bool = False):
+    """
+    更新内存中的代理配置，并可选择持久化到 `ChanConfig.py` 文件中。
+
+    参数:
+        http: HTTP 代理 URL（例如 'http://127.0.0.1:7890' 或 'socks5h://127.0.0.1:7891'）。
+        https: 可选的 HTTPS 代理 URL，若为 None 则使用与 http 相同的地址。
+        persist: 若为 True，则把代理配置写回到 `ChanConfig.py` 源文件顶部（覆盖或追加）。
+    """
+    PROXY['http'] = http
+    PROXY['https'] = https or http
+    if not persist:
+        return
+
+    # 将配置写回当前文件（修改源码），尝试替换已有 PROXY 行，否则追加到文件末尾
+    import io
+    import os
+
+    filepath = os.path.realpath(__file__)
+    with io.open(filepath, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    found = False
+    for idx, line in enumerate(lines):
+        if line.strip().startswith('PROXY ='):
+            lines[idx] = f"PROXY = {{'http': {repr(PROXY['http'])}, 'https': {repr(PROXY['https'])}}}\n"
+            found = True
+            break
+
+    if not found:
+        lines.append("\n")
+        lines.append(f"PROXY = {{'http': {repr(PROXY['http'])}, 'https': {repr(PROXY['https'])}}}\n")
+
+    with io.open(filepath, 'w', encoding='utf-8') as f:
+        f.writelines(lines)
