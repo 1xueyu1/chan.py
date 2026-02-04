@@ -1,3 +1,13 @@
+"""核心控制类 CChan：负责数据加载、分层 K 线组织与调用计算流程。
+
+该模块提供 `CChan` 用于：
+- 根据配置和数据源加载不同级别的 K 线数据；
+- 维护各级别 KLine 列表并按父子关系组织；
+- 提供回放/触发式（实时）加载接口。
+
+注：注释简洁覆盖类和公开方法，便于阅读与二次开发。
+"""
+
 import copy
 import datetime
 import pickle
@@ -17,6 +27,16 @@ from KLine.KLine_Unit import CKLine_Unit
 
 
 class CChan:
+    """主引擎类，封装数据加载与结构化逻辑。
+
+    参数:
+        code: 标的代码或交易对（例如 'BTC/USDT'）。
+        begin_time/end_time: 数据时间范围，字符串或 date。
+        data_src: 数据来源枚举或自定义字符串。
+        lv_list: K 线级别列表（高->低）。
+        config: CChanConfig 实例。
+        autype: 复权类型（保留接口）。
+    """
     def __init__(
         self,
         code,
@@ -83,27 +103,38 @@ class CChan:
         return obj
 
     def do_init(self):
+        """初始化各级别的 `CKLine_List` 容器。每次重置/重新计算均调用。"""
         self.kl_datas: Dict[KL_TYPE, CKLine_List] = {}
         for idx in range(len(self.lv_list)):
             self.kl_datas[self.lv_list[idx]] = CKLine_List(self.lv_list[idx], conf=self.conf)
 
     def load_stock_data(self, stockapi_instance: CCommonStockApi, lv) -> Iterable[CKLine_Unit]:
+        """从指定数据源实例迭代读取 KLU，并设置索引与级别。
+
+        返回：可迭代的 `CKLine_Unit` 对象流。
+        """
         for KLU_IDX, klu in enumerate(stockapi_instance.get_kl_data()):
             klu.set_idx(KLU_IDX)
             klu.kl_type = lv
             yield klu
 
     def get_load_stock_iter(self, stockapi_cls, lv):
+        """构建并返回指定级别的数据迭代器（封装数据源实例）。"""
         stockapi_instance = stockapi_cls(code=self.code, k_type=lv, begin_date=self.begin_time, end_date=self.end_time, autype=self.autype)
         return self.load_stock_data(stockapi_instance, lv)
 
     def add_lv_iter(self, lv_idx, iter):
+        """将一个级别迭代器加入内部队列（支持按索引或级别枚举）。"""
         if isinstance(lv_idx, int):
             self.g_kl_iter[self.lv_list[lv_idx]].append(iter)
         else:
             self.g_kl_iter[lv_idx].append(iter)
 
     def get_next_lv_klu(self, lv_idx):
+        """从指定级别的迭代器队列中返回下一个 KLU。
+
+        若当前子迭代器耗尽则自动弹出并继续下一个。
+        """
         if isinstance(lv_idx, int):
             lv_idx = self.lv_list[lv_idx]
         if len(self.g_kl_iter[lv_idx]) == 0:
@@ -118,6 +149,10 @@ class CChan:
                 raise
 
     def step_load(self):
+        """触发式（逐步）加载入口：用于回放/实时触发场景。
+
+        返回生成器，按触发步长逐次产出 `self`（或快照）。
+        """
         assert self.conf.trigger_step
         self.do_init()  # 清空数据，防止再次重跑没有数据
         yielded = False  # 是否曾经返回过结果
@@ -130,6 +165,10 @@ class CChan:
             yield self
 
     def trigger_load(self, inp):
+        """接受外部触发数据 (字典形式)，将其注入引擎并推进计算流程。
+
+        输入 `inp` 格式为 {lv: [CKLine_Unit, ...]}。
+        """
         # {type: [klu, ...]}
         if not hasattr(self, 'klu_cache'):
             self.klu_cache: List[Optional[CKLine_Unit]] = [None for _ in self.lv_list]
@@ -151,6 +190,7 @@ class CChan:
                 self.kl_datas[lv].cal_seg_and_zs()
 
     def init_lv_klu_iter(self, stockapi_cls):
+        """为每个级别创建数据迭代器，遇到无法获取的数据根据配置决定是否跳过。"""
         # 为了跳过一些获取数据失败的级别
         lv_klu_iter = []
         valid_lv_list = []
@@ -169,6 +209,7 @@ class CChan:
         return lv_klu_iter
 
     def GetStockAPI(self):
+        """根据 `data_src` 返回相应的数据源类。支持内置类型及自定义 `custom:package.Class`。"""
         _dict = {}
         if self.data_src == DATA_SRC.BAO_STOCK:
             from DataAPI.BaoStockAPI import CBaoStock
@@ -194,6 +235,12 @@ class CChan:
         return getattr(module, cls_name)
 
     def load(self, step=False):
+        """核心加载流程：
+
+        - 初始化数据源并为每级别创建迭代器；
+        - 按层级迭代合并并生成最终结构；
+        - 非回放模式在结束后计算线段与中枢。
+        """
         stockapi_cls = self.GetStockAPI()
         try:
             stockapi_cls.do_init()
@@ -214,12 +261,14 @@ class CChan:
             raise CChanException("最高级别没有获得任何数据", ErrCode.NO_DATA)
 
     def set_klu_parent_relation(self, parent_klu, kline_unit, cur_lv, lv_idx):
+        """将 `kline_unit` 设为 `parent_klu` 的子项并根据需要校验时间一致性。"""
         if self.conf.kl_data_check and kltype_lte_day(cur_lv) and kltype_lte_day(self.lv_list[lv_idx-1]):
             self.check_kl_consitent(parent_klu, kline_unit)
         parent_klu.add_children(kline_unit)
         kline_unit.set_parent(parent_klu)
 
     def add_new_kl(self, cur_lv: KL_TYPE, kline_unit):
+        """将新 KLU 添加到对应级别的 `CKLine_List`，并在异常时打印错误位置。"""
         try:
             self.kl_datas[cur_lv].add_single_klu(kline_unit)
         except Exception:
@@ -228,6 +277,7 @@ class CChan:
             raise
 
     def try_set_klu_idx(self, lv_idx: int, kline_unit: CKLine_Unit):
+        """尝试为未设置索引的 KLU 分配顺序索引。"""
         if kline_unit.idx >= 0:
             return
         if len(self[lv_idx]) == 0:
@@ -236,6 +286,7 @@ class CChan:
             kline_unit.set_idx(self[lv_idx][-1][-1].idx + 1)
 
     def load_iterator(self, lv_idx, parent_klu, step):
+        """递归迭代器：将低级别 KLU 嵌套到高级别，确保时间与父级对齐。"""
         # K线时间天级别以下描述的是结束时间，如60M线，每天第一根是10点30的
         # 天以上是当天日期
         cur_lv = self.lv_list[lv_idx]
@@ -271,6 +322,7 @@ class CChan:
                 yield self
 
     def check_kl_consitent(self, parent_klu, sub_klu):
+        """检查父子级别时间是否一致，若不一致则记录并根据阈值抛出异常。"""
         if parent_klu.time.year != sub_klu.time.year or \
            parent_klu.time.month != sub_klu.time.month or \
            parent_klu.time.day != sub_klu.time.day:
@@ -281,6 +333,7 @@ class CChan:
                 raise CChanException(f"父&子级别K线时间不一致条数超过{self.conf.max_kl_inconsistent_cnt}！！", ErrCode.KL_TIME_INCONSISTENT)
 
     def check_kl_align(self, kline_unit, lv_idx):
+        """当次级别找不到对应 K 线时触发告警或异常（由配置决定）。"""
         if self.conf.kl_data_check and len(kline_unit.sub_kl_list) == 0:
             self.kl_misalign_cnt += 1
             if self.conf.print_warning:
@@ -289,6 +342,7 @@ class CChan:
                 raise CChanException(f"在次级别找不到K线条数超过{self.conf.max_kl_misalgin_cnt}！！", ErrCode.KL_DATA_NOT_ALIGN)
 
     def __getitem__(self, n) -> CKLine_List:
+        """按级别枚举或索引获取对应的 `CKLine_List`。"""
         if isinstance(n, KL_TYPE):
             return self.kl_datas[n]
         elif isinstance(n, int):
@@ -297,6 +351,7 @@ class CChan:
             raise CChanException("unspoourt query type", ErrCode.COMMON_ERROR)
 
     def get_bsp(self, idx=None) -> List[CBS_Point]:
+        """已废弃：获取历史 BSP 列表（保持兼容）。"""
         print('[deprecated] use get_latest_bsp instead')
         if idx is not None:
             return self[idx].bs_point_lst.getSortedBspList()
@@ -304,13 +359,14 @@ class CChan:
         return self[0].bs_point_lst.getSortedBspList()
 
     def get_latest_bsp(self, idx=None, number=1) -> List[CBS_Point]:
-        # number=0则取全部bsp，从最新到最旧排序
+        """获取最新的 BSP（交易信号点）列表；`number=0` 表示全部。"""
         if idx is not None:
             return self[idx].bs_point_lst.get_latest_bsp(number)
         assert len(self.lv_list) == 1
         return self[0].bs_point_lst.get_latest_bsp(number)
 
     def chan_dump_pickle(self, file_path):
+        """将当前 `CChan` 对象序列化到文件（pickle），并在保存前清理循环引用。"""
         _pre_limit = sys.getrecursionlimit()
         sys.setrecursionlimit(0x100000)
         for kl_list in self.kl_datas.values():
@@ -339,6 +395,7 @@ class CChan:
 
     @staticmethod
     def chan_load_pickle(file_path) -> 'CChan':
+        """从 pickle 文件加载并恢复 `CChan` 对象的链式引用。"""
         with open(file_path, "rb") as f:
             chan = pickle.load(f)
         chan.chan_pickle_restore()
@@ -346,6 +403,7 @@ class CChan:
         return chan
 
     def chan_pickle_restore(self):
+        """在从 pickle 恢复后重建 KLU/BI/SEG 等链式 `pre/next` 指针。"""
         for kl_list in self.kl_datas.values():
             last_klu = None
             last_klc = None

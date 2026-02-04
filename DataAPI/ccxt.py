@@ -91,8 +91,8 @@ class CCXT(CCommonStockApi):
         data = exchange.fetch_ohlcv(self.code, timeframe, since=since_date)
 
         for item in data:
-            # item[0] 是毫秒时间戳，需要转换为可读时间字符串
-            time_obj = datetime.fromtimestamp(item[0] / 1000)
+            # item[0] 是毫秒时间戳，使用 UTC 时间避免本地时区偏移导致父子日期不一致
+            time_obj = datetime.utcfromtimestamp(item[0] / 1000)
             time_str = time_obj.strftime('%Y-%m-%d %H:%M:%S')
             item_data = [
                 time_str,
