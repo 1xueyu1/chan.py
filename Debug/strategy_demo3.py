@@ -1,3 +1,10 @@
+"""
+示例：展示如何用更细级别的 K 线（15 分钟）合成更高级别的 K 线（60 分钟），
+并演示将合成后的 K 线与原始小级别 K 线一并喂入 `CChan` 来刷新计算结果的思路。
+
+注意：此脚本仅为演示，不一定能直接运行（示例聚焦用法而非完整可执行流程）。
+"""
+
 import copy
 from typing import List
 
@@ -9,6 +16,7 @@ from KLine.KLine_Unit import CKLine_Unit
 
 
 def combine_60m_klu_form_15m(klu_15m_lst: List[CKLine_Unit]) -> CKLine_Unit:
+    # 将 4 根 15 分钟 K 线合成为 1 根 60 分钟 K 线（取首开、末收、最高、最低、末时间）
     return CKLine_Unit(
         {
             DATA_FIELD.FIELD_TIME: klu_15m_lst[-1].time,
@@ -21,9 +29,8 @@ def combine_60m_klu_form_15m(klu_15m_lst: List[CKLine_Unit]) -> CKLine_Unit:
 
 
 if __name__ == "__main__":
-    """
-    代码不能直接跑，仅用于展示如何实现小级别K线更新直接刷新CChan结果
-    """
+    # 演示主流程：按 15 分钟 K 线步进、合成 60 分钟 K 线、深拷贝快照并触发计算
+    # 该流程展示如何在不破坏原始快照的前提下，对每个小级别更新做独立计算与策略判断
     code = "sz.000001"
     begin_time = "2023-09-10"
     end_time = None

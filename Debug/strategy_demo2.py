@@ -1,58 +1,78 @@
+"""
+示例策略：仅用于展示如何向 `CChan` 外部喂入 K 线并触发缠论计算。
+策略逻辑：当检测到底分型且为买点时开仓，遇到顶分型且为卖点时平仓。
+仅作演示回测用途，不作为交易建议。
+"""
+
 from Chan import CChan
 from ChanConfig import CChanConfig
 from Common.CEnum import AUTYPE, BSP_TYPE, DATA_SRC, FX_TYPE, KL_TYPE
 from DataAPI.BaoStockAPI import CBaoStock
 
 if __name__ == "__main__":
-    """
-    一个极其弱智的策略，只交易一类买卖点，底分型形成后就开仓，直到一类卖点顶分型形成后平仓
-    只用做展示如何自己实现策略，做回测用~
-    相比于strategy_demo.py，本代码演示如何从CChan外部喂K线来触发内部缠论计算
-    """
-    code = "sz.000001"
-    begin_time = "2021-01-01"
-    end_time = None
-    data_src_type = DATA_SRC.BAO_STOCK
-    lv_list = [KL_TYPE.K_DAY]
+    # === 参数设置 ===
+    code = "sz.000001"  # 标的代码
+    begin_time = "2021-01-01"  # 起始时间（用于回测）
+    end_time = None  # 结束时间，None 表示直到最新
+    data_src_type = DATA_SRC.BAO_STOCK  # 数据来源类型
+    lv_list = [KL_TYPE.K_DAY]  # 使用的级别列表（这里只用日线）
 
+    # 简洁配置：只保留示例需要的关键项
     config = CChanConfig({
         "trigger_step": True,
         "divergence_rate": 0.8,
         "min_zs_cnt": 1,
     })
 
+    # 初始化缠论对象（部分参数在外部喂入场景中可不依赖）
     chan = CChan(
         code=code,
-        begin_time=begin_time,  # 已经没啥用了这一行
-        end_time=end_time,  # 已经没啥用了这一行
-        data_src=data_src_type,  # 已经没啥用了这一行
+        begin_time=begin_time,
+        end_time=end_time,
+        data_src=data_src_type,
         lv_list=lv_list,
         config=config,
-        autype=AUTYPE.QFQ,  # 已经没啥用了这一行
+        autype=AUTYPE.QFQ,
     )
-    CBaoStock.do_init()
-    data_src = CBaoStock(code, k_type=KL_TYPE.K_DAY, begin_date=begin_time, end_date=end_time, autype=AUTYPE.QFQ)  # 初始化数据源类
 
-    is_hold = False
-    last_buy_price = None
-    for klu in data_src.get_kl_data():  # 获取单根K线
-        chan.trigger_load({KL_TYPE.K_DAY: [klu]})  # 喂给CChan新增k线
+    # 初始化并创建数据源（示例使用宝塔数据源）
+    CBaoStock.do_init()
+    data_src = CBaoStock(code, k_type=KL_TYPE.K_DAY, begin_date=begin_time, end_date=end_time, autype=AUTYPE.QFQ)
+
+    # 策略状态变量
+    is_hold = False  # 是否持仓
+    last_buy_price = None  # 记录最后一次买入价格
+
+    # 主循环：按单根 K 线喂入缠论计算并检查买卖点
+    for klu in data_src.get_kl_data():  # 遍历源数据中的每根 K 线
+        chan.trigger_load({KL_TYPE.K_DAY: [klu]})  # 将新 K 线推入 CChan
+
+        # 获取最新的买卖点列表（内部根据缠论计算得出）
         bsp_list = chan.get_latest_bsp()
         if not bsp_list:
             continue
+
         last_bsp = bsp_list[0]
+        # 只关注 T1/T1P 类型的买卖点（示例策略聚焦一类）
         if BSP_TYPE.T1 not in last_bsp.type and BSP_TYPE.T1P not in last_bsp.type:
             continue
 
-        cur_lv_chan = chan[0]
+        cur_lv_chan = chan[0]  # 取当前级别的缠论结构
+        # 确保买卖点对应的是刚才计算出的分型（索引匹配）
         if last_bsp.klu.klc.idx != cur_lv_chan[-2].idx:
             continue
+
+        # 开仓条件：前一个分型为底分型且买点标志且当前未持仓
         if cur_lv_chan[-2].fx == FX_TYPE.BOTTOM and last_bsp.is_buy and not is_hold:
             last_buy_price = cur_lv_chan[-1][-1].close
             print(f'{cur_lv_chan[-1][-1].time}:buy price = {last_buy_price}')
             is_hold = True
+
+        # 平仓条件：前一个分型为顶分型且卖点标志且当前持仓
         elif cur_lv_chan[-2].fx == FX_TYPE.TOP and not last_bsp.is_buy and is_hold:
             sell_price = cur_lv_chan[-1][-1].close
             print(f'{cur_lv_chan[-1][-1].time}:sell price = {sell_price}, profit rate = {(sell_price-last_buy_price)/last_buy_price*100:.2f}%')
             is_hold = False
+
+    # 关闭数据源
     CBaoStock.do_close()

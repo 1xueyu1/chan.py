@@ -1,3 +1,8 @@
+"""
+示例：实盘/回测中如何使用 demo5 训练得到的模型对实时产生的买卖点进行打分预测。
+流程：加载模型与特征 meta，将检测到的新买卖点的特征对齐后送入模型预测分数。
+"""
+
 import json
 from typing import Dict, TypedDict
 
@@ -30,9 +35,7 @@ def predict_bsp(model: xgb.Booster, last_bsp: CBS_Point, meta: Dict[str, int]):
 
 
 if __name__ == "__main__":
-    """
-    本demo主要演示如何在实盘中把策略产出的买卖点，对接到demo5中训练好的离线模型上
-    """
+    # 主流程：加载训练好的模型与 feature.meta，在遍历到新的买卖点时对其特征做对齐并预测得分
     code = "sz.000001"
     begin_time = "2018-01-01"
     end_time = None

@@ -1,3 +1,8 @@
+"""
+示例：演示如何收集策略产生的买卖点特征，生成训练样本，训练 XGBoost 模型，
+并可视化检查标签（仅作演示，训练与预测使用同一数据集仅为示例用途）。
+"""
+
 import json
 from typing import Dict, TypedDict
 
@@ -43,8 +48,9 @@ def plot(chan, plot_marker):
 
 
 def stragety_feature(last_klu):
+    # 示例特征提取：以最近一根 K 线的开收差作为单一特征
     return {
-        "open_klu_rate": (last_klu.close - last_klu.open)/last_klu.open,
+        "open_klu_rate": (last_klu.close - last_klu.open) / last_klu.open,
     }
 
 
@@ -87,9 +93,10 @@ if __name__ == "__main__":
         autype=AUTYPE.QFQ,
     )
 
-    bsp_dict: Dict[int, T_SAMPLE_INFO] = {}  # 存储策略产出的bsp的特征
+    bsp_dict: Dict[int, T_SAMPLE_INFO] = {}  # 存储策略产出的 bsp 的特征
 
     # 跑策略，保存买卖点的特征
+    # 遍历按步快照，收集每个买卖点的特征（示例中以分形完成时记录）
     for chan_snapshot in chan.step_load():
         last_klu = chan_snapshot[0][-1][-1]
         bsp_list = chan_snapshot.get_latest_bsp()
@@ -98,6 +105,7 @@ if __name__ == "__main__":
         last_bsp = bsp_list[0]
 
         cur_lv_chan = chan_snapshot[0]
+        # 只在买卖点第一次出现且索引对齐时记录样本特征
         if last_bsp.klu.idx not in bsp_dict and cur_lv_chan[-2].idx == last_bsp.klu.klc.idx:
             # 假如策略是：买卖点分形第三元素出现时交易
             bsp_dict[last_bsp.klu.idx] = {
@@ -105,10 +113,11 @@ if __name__ == "__main__":
                 "is_buy": last_bsp.is_buy,
                 "open_time": last_klu.time,
             }
-            bsp_dict[last_bsp.klu.idx]['feature'].add_feat(stragety_feature(last_klu))  # 开仓K线特征
+            # 为该买卖点加入当前开仓 K 线的补充特征
+            bsp_dict[last_bsp.klu.idx]["feature"].add_feat(stragety_feature(last_klu))
             print(last_bsp.klu.time, last_bsp.is_buy)
 
-    # 生成libsvm样本特征
+    # 将收集到的特征输出为 libsvm 格式，供 XGBoost 训练使用
     bsp_academy = [bsp.klu.idx for bsp in chan.get_latest_bsp(number=0)]
     feature_meta = {}  # 特征meta
     cur_feature_idx = 0
@@ -128,15 +137,15 @@ if __name__ == "__main__":
         plot_marker[feature_info["open_time"].to_str()] = ("√" if label else "×", "down" if feature_info["is_buy"] else "up")
     fid.close()
 
+    # 保存特征 meta（实盘载入模型时需要用此 meta 对齐特征）
     with open("feature.meta", "w") as fid:
-        # meta保存下来，实盘预测时特征对齐用
         fid.write(json.dumps(feature_meta))
 
-    # 画图检查label是否正确
+    # 可视化：将带标签的买卖点画到图上便于检查
     plot(chan, plot_marker)
 
-    # load sample file & train model
-    dtrain = xgb.DMatrix("feature.libsvm?format=libsvm")  # load sample
+    # 使用 libsvm 文件训练 XGBoost 模型（示例参数）
+    dtrain = xgb.DMatrix("feature.libsvm?format=libsvm")
     param = {'max_depth': 2, 'eta': 0.3, 'objective': 'binary:logistic', 'eval_metric': 'auc'}
     evals_result = {}
     bst = xgb.train(
@@ -149,8 +158,7 @@ if __name__ == "__main__":
     )
     bst.save_model("model.json")
 
-    # load model
+    # 演示加载模型并对训练数据做一次预测（仅作完整流程展示）
     model = xgb.Booster()
     model.load_model("model.json")
-    # predict
     print(model.predict(dtrain))
