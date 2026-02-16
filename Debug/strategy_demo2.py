@@ -35,7 +35,7 @@ if __name__ == "__main__":
         autype=AUTYPE.QFQ,
     )
 
-    # 初始化并创建数据源（示例使用宝塔数据源）
+    # 初始化并创建数据源
     CBaoStock.do_init()
     data_src = CBaoStock(code, k_type=KL_TYPE.K_DAY, begin_date=begin_time, end_date=end_time, autype=AUTYPE.QFQ)
 

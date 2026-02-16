@@ -78,9 +78,9 @@ BSP_MAIN_TYPE = Literal['1', '2', '3']
 # BSP 类型（字符串编码形式），提供获取主类别的方法
 class BSP_TYPE(Enum):
     T1 = '1'
-    T1P = '1p'
+    T1P = '1p'  # 类 1 买
     T2 = '2'
-    T2S = '2s'
+    T2S = '2s'  # 类 2 买
     T3A = '3a'  # 中枢在1类后面
     T3B = '3b'  # 中枢在1类前面
 

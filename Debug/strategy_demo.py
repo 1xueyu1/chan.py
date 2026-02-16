@@ -10,10 +10,11 @@ from Common.CEnum import AUTYPE, BSP_TYPE, DATA_SRC, FX_TYPE, KL_TYPE
 if __name__ == "__main__":
     # 简单示例策略：只交易一类买卖点（底分型开仓，顶分型平仓）
     # 该脚本用于回测演示，逻辑保持简洁清晰。
-    code = "sz.000001"
-    begin_time = "2021-01-01"
-    end_time = None
-    data_src = DATA_SRC.BAO_STOCK
+    # 与 main.py 保持一致，使用 CCXT 获取合约/交易对数据（示例使用 BTC/USDT）
+    code = "BTC/USDT"
+    begin_time = "2025-01-01"
+    end_time = "2026-02-04"
+    data_src = DATA_SRC.CCXT
     lv_list = [KL_TYPE.K_DAY]
 
     # CChan 配置：开启 step 触发并设置分歧率与最小中枢数
@@ -31,7 +32,7 @@ if __name__ == "__main__":
         data_src=data_src,
         lv_list=lv_list,
         config=config,
-        autype=AUTYPE.QFQ,
+        autype=AUTYPE.NONE,  # 合约/CCXT 数据无需复权
     )
 
     is_hold = False

@@ -27,12 +27,12 @@ if __name__ == "__main__":
     # 初始化 CChan（在首次触发时会把次级别历史 K 线一并喂入）
     chan = CChan(
         code=code,
-        begin_time=begin_time,
-        end_time=end_time,
-        data_src=data_src,
+        begin_time=begin_time,  # 已经没啥用了这一行
+        end_time=end_time,  # 已经没啥用了这一行
+        data_src=data_src,  # 已经没啥用了这一行
         lv_list=lv_list,
         config=config,
-        autype=AUTYPE.QFQ,
+        autype=AUTYPE.QFQ,  # 已经没啥用了这一行
     )
     CBaoStock.do_init()
     data_src_day = CBaoStock(code, k_type=KL_TYPE.K_DAY, begin_date=begin_time, end_date=end_time, autype=AUTYPE.QFQ)
