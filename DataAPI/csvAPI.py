@@ -1,125 +1,148 @@
 import os
+from datetime import datetime
 
-from Common.CEnum import DATA_FIELD, KL_TYPE
+from Common.CEnum import AUTYPE, DATA_FIELD, KL_TYPE
 from Common.ChanException import CChanException, ErrCode
 from Common.CTime import CTime
-from Common.func_util import str2float
+from Common.func_util import kltype_lt_day, str2float
 from KLine.KLine_Unit import CKLine_Unit
 
 from .CommonStockAPI import CCommonStockApi
 
 
-# 将 CSV 行数据转换为字段字典
-# - 对时间列使用 parse_time_column 解析为 CTime
-# - 其他列使用 str2float 转为浮点数
-def create_item_dict(data, column_name):
-    for i in range(len(data)):
-        data[i] = parse_time_column(data[i]) if column_name[i] == DATA_FIELD.FIELD_TIME else str2float(data[i])
-    return dict(zip(column_name, data))
-
-
-# 解析时间列的字符串，支持三种常见格式：
-# - 长度为10: 'YYYY-MM-DD'，只包含日期，时分设为0
-# - 长度为17: 'YYYYMMDDhhmmss...'（示例: 20210902113000000），按连写格式解析年月日时分
-# - 长度为19: 'YYYY-MM-DD hh:mm:ss' 或类似格式，按常见带分隔符的日期时间解析
-# 返回 CTime 对象
-def parse_time_column(inp):
-    # 20210902113000000
-    # 2021-09-13
-    if len(inp) == 10:
-        year = int(inp[:4])
-        month = int(inp[5:7])
-        day = int(inp[8:10])
-        hour = minute = 0
-    elif len(inp) == 17:
-        year = int(inp[:4])
-        month = int(inp[4:6])
-        day = int(inp[6:8])
-        hour = int(inp[8:10])
-        minute = int(inp[10:12])
-    elif len(inp) == 19:
-        year = int(inp[:4])
-        month = int(inp[5:7])
-        day = int(inp[8:10])
-        hour = int(inp[11:13])
-        minute = int(inp[14:16])
-    else:
-        # 未知格式时抛出异常，调用方可捕获并处理
-        raise Exception(f"unknown time column from csv:{inp}")
-    return CTime(year, month, day, hour, minute)
+def GetColumnNameFromFieldList(fields: str):
+    _dict = {
+        "time": DATA_FIELD.FIELD_TIME,
+        "open": DATA_FIELD.FIELD_OPEN,
+        "high": DATA_FIELD.FIELD_HIGH,
+        "low": DATA_FIELD.FIELD_LOW,
+        "close": DATA_FIELD.FIELD_CLOSE,
+        "volume": DATA_FIELD.FIELD_VOLUME,
+    }
+    return [_dict[x] for x in fields.split(",")]
 
 
 class CSV_API(CCommonStockApi):
-    """
-    CSV 数据源 API
 
-    说明:
-    - 从工程相对目录中读取以 `{code}_{k_type}.csv` 命名的文件
-    - 默认第一行为表头, 若为数据请将 `headers_exist` 设为 False
-    - 生成 `CKLine_Unit` 对象以供上层使用
-    """
+    def __init__(self, code, k_type=KL_TYPE.K_DAY,
+                 begin_date=None, end_date=None,
+                 autype=AUTYPE.QFQ):
 
-    def __init__(self, code, k_type=KL_TYPE.K_DAY, begin_date=None, end_date=None, autype=None):
-        # 是否包含表头行，若 CSV 第一行即为数据则设为 False
-        self.headers_exist = True
-        # 默认列顺序，时间 + OHLC
-        self.columns = [
-            DATA_FIELD.FIELD_TIME,
-            DATA_FIELD.FIELD_OPEN,
-            DATA_FIELD.FIELD_HIGH,
-            DATA_FIELD.FIELD_LOW,
-            DATA_FIELD.FIELD_CLOSE,
-            # 如需成交量等字段，可在此处添加
-            # DATA_FIELD.FIELD_VOLUME,
-            # DATA_FIELD.FIELD_TURNOVER,
-            # DATA_FIELD.FIELD_TURNRATE,
-        ]
-        # 时间列在 columns 中的索引，用于时间范围过滤
-        self.time_column_idx = self.columns.index(DATA_FIELD.FIELD_TIME)
-        super(CSV_API, self).__init__(code, k_type, begin_date, end_date, autype)
+        self.headers_exist = False
+
+        super(CSV_API, self).__init__(code, k_type,
+                                      begin_date, end_date, autype)
 
     def get_kl_data(self):
-        """
-        逐行读取 CSV 文件并生成 `CKLine_Unit`。
 
-        行为:
-        - 根据 `self.k_type` 确定文件名后缀
-        - 跳过表头（若 `self.headers_exist` 为 True）
-        - 校验每行字段数量与 `self.columns` 一致
-        - 根据 begin_date/end_date 进行过滤（字符串比较，需保证格式一致）
-        - 使用 `create_item_dict` 将行数据转换为字典，再封装为 `CKLine_Unit`
-        """
+        fields = "time,open,high,low,close,volume"
+        column_name = GetColumnNameFromFieldList(fields)
+
         cur_path = os.path.dirname(os.path.realpath(__file__))
         k_type = self.k_type.name[2:].lower()
-        file_path = f"{cur_path}/../{self.code}_{k_type}.csv"
-        if not os.path.exists(file_path):
-            raise CChanException(f"file not exist: {file_path}", ErrCode.SRC_DATA_NOT_FOUND)
+        file_path = f"{cur_path}/../btc_data/{self.code}_{k_type}.csv"
 
-        for line_number, line in enumerate(open(file_path, 'r')):
-            # 跳过表头
-            if self.headers_exist and line_number == 0:
-                continue
-            data = line.strip("\n").split(",")
-            # 字段数不匹配视为格式错误
-            if len(data) != len(self.columns):
-                raise CChanException(f"file format error: {file_path}", ErrCode.SRC_DATA_FORMAT_ERROR)
-            # 按时间字符串进行简单过滤（假设时间字符串可直接比较）
-            if self.begin_date is not None and data[self.time_column_idx] < self.begin_date:
-                continue
-            if self.end_date is not None and data[self.time_column_idx] > self.end_date:
-                continue
-            yield CKLine_Unit(create_item_dict(data, self.columns))
+        if not os.path.exists(file_path):
+            raise CChanException(
+                f"file not exist: {file_path}",
+                ErrCode.SRC_DATA_NOT_FOUND
+            )
+
+        # begin_date 转成 CTime（如果有）
+        begin_ctime = None
+        end_ctime = None
+
+        if self.begin_date:
+            begin_ctime = self.parse_time_column(self.begin_date + " 00:00:00")
+
+        if self.end_date:
+            end_ctime = self.parse_time_column(self.end_date + " 23:59:59")
+
+        with open(file_path, "r") as f:
+
+            for line_number, line in enumerate(f):
+
+                if self.headers_exist and line_number == 0:
+                    continue
+
+                raw = line.strip().split(",")
+
+                # Binance 12列格式
+                if len(raw) < 6:
+                    raise CChanException(
+                        f"file format error: {file_path}",
+                        ErrCode.SRC_DATA_FORMAT_ERROR
+                    )
+
+                # 只取前6列
+                row = raw[:6]
+
+                # 时间解析
+                ktime = self.parse_time_column(row[0])
+
+                # 时间过滤（对象比较）
+                if begin_ctime and ktime < begin_ctime:
+                    continue
+                if end_ctime and ktime > end_ctime:
+                    continue
+
+                yield CKLine_Unit(
+                    self.create_item_dict(row, column_name),
+                    autofix=True
+                )
+
+    def parse_time_column(self, inp):
+        """
+        支持：
+        - 13位毫秒时间戳
+        - yyyy-mm-dd
+        - yyyy-mm-dd HH:MM:SS
+        """
+
+        # 毫秒时间戳（Binance CSV）
+        if inp.isdigit() and len(inp) == 13:
+            dt = datetime.utcfromtimestamp(int(inp) / 1000)
+            return CTime(dt.year, dt.month, dt.day,
+                         dt.hour, dt.minute,
+                         auto=not kltype_lt_day(self.k_type))
+
+        # yyyy-mm-dd
+        if len(inp) == 10:
+            year = int(inp[:4])
+            month = int(inp[5:7])
+            day = int(inp[8:10])
+            hour = minute = 0
+
+        # yyyy-mm-dd HH:MM:SS
+        elif len(inp) == 19:
+            year = int(inp[:4])
+            month = int(inp[5:7])
+            day = int(inp[8:10])
+            hour = int(inp[11:13])
+            minute = int(inp[14:16])
+
+        else:
+            raise Exception(f"unknown time column from CSV:{inp}")
+
+        return CTime(year, month, day,
+                     hour, minute,
+                     auto=not kltype_lt_day(self.k_type))
+
+    def create_item_dict(self, data, column_name):
+
+        for i in range(len(data)):
+            data[i] = self.parse_time_column(data[i]) \
+                if i == 0 else str2float(data[i])
+
+        return dict(zip(column_name, data))
 
     def SetBasciInfo(self):
-        # 占位方法：设置基础信息（按需实现）
         pass
 
     @classmethod
     def do_init(cls):
-        # 类级别初始化（按需实现）
         pass
 
     @classmethod
     def do_close(cls):
-        # 类级别清理（按需实现）
         pass
