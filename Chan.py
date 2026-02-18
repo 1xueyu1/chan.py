@@ -61,7 +61,9 @@ class CChan:
             config = CChanConfig()
         self.conf = config
 
+        # 记录子级别找不到K线的次数
         self.kl_misalign_cnt = 0
+        # 记录父子时间不一致
         self.kl_inconsistent_detail = defaultdict(list)
 
         self.g_kl_iter = defaultdict(list)

@@ -15,13 +15,13 @@ from Plot.PlotDriver import CPlotDriver
 if __name__ == "__main__":
     # 交易对与时间范围（BTC 合约示例）
     code = "BTC/USDT"
-    begin_time = "2026-01-01"
+    begin_time = "2025-01-01"
     end_time = "2026-02-04"
 
     # 数据来源：使用 ccxt 获取加密货币数据
     data_src = DATA_SRC.CCXT
     # 关注的 K 线粒度列表（此处仅日线）
-    lv_list = [KL_TYPE.K_DAY, KL_TYPE.K_60M, KL_TYPE.K_15M]
+    lv_list = [KL_TYPE.K_DAY]
 
     # 缠论 配置参数
     config = CChanConfig({
@@ -47,7 +47,7 @@ if __name__ == "__main__":
         "plot_seg": True,
         "plot_eigen": False,
         "plot_zs": True,
-        "plot_macd": False,
+        "plot_macd": True,
         "plot_mean": False,
         "plot_channel": False,
         "plot_bsp": True,
