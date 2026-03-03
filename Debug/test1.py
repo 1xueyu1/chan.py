@@ -6,8 +6,7 @@
 from Chan import CChan
 from ChanConfig import CChanConfig
 from Common.CEnum import AUTYPE, BSP_TYPE, DATA_SRC, FX_TYPE, KL_TYPE
-from Plot.AnimatePlotDriver import CAnimateDriver
-from Plot.PlotDriver import CPlotDriver
+from Plot import get_plot_driver
 
 
 if __name__ == "__main__":
@@ -93,11 +92,9 @@ if __name__ == "__main__":
             print(f'{cur_lv_chan[-1][-1].time}:sell price = {sell_price}, profit rate = {(sell_price-last_buy_price)/last_buy_price*100:.2f}%')
             is_hold = False
 
-    # 根据是否为动图模式选择静态或动画绘制
-    if not config.trigger_step:
-        plot_driver = CPlotDriver(chan, plot_config=plot_config, plot_para=plot_para)
-        plot_driver.figure.show()          # 在交互环境显示
-        plot_driver.save2img("./result/test.png")
-    else:
-        CAnimateDriver(chan, plot_config=plot_config, plot_para=plot_para)
+    # 使用 plotly 引擎绘图
+    CPlotDriver = get_plot_driver("plotly")
+    plot_driver = CPlotDriver(chan, plot_config=plot_config, plot_para=plot_para)
+    plot_driver.show()
+    plot_driver.save2img("./result/test1.html")
     

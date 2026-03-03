@@ -14,8 +14,7 @@ from Chan import CChan
 from ChanConfig import CChanConfig
 from Common.CEnum import AUTYPE, DATA_FIELD, DATA_SRC, KL_TYPE
 from DataAPI.csvAPI import CSV_API
-from Plot.AnimatePlotDriver import CAnimateDriver
-from Plot.PlotDriver import CPlotDriver
+from Plot import get_plot_driver
 from KLine.KLine_Unit import CKLine_Unit
 
 
@@ -28,6 +27,7 @@ def combine_60m_klu_form_15m(klu_15m_lst: List[CKLine_Unit]) -> CKLine_Unit:
             DATA_FIELD.FIELD_CLOSE: klu_15m_lst[-1].close,
             DATA_FIELD.FIELD_HIGH: max(klu.high for klu in klu_15m_lst),
             DATA_FIELD.FIELD_LOW: min(klu.low for klu in klu_15m_lst),
+            DATA_FIELD.FIELD_VOLUME: sum(klu.vol for klu in klu_15m_lst),
         }
     )
 
@@ -117,10 +117,8 @@ if __name__ == "__main__":
     # 关闭数据源
     CSV_API.do_close()
 
-        # 根据是否为动图模式选择静态或动画绘制
-    if not config.trigger_step:
-        plot_driver = CPlotDriver(chan_snapshot, plot_config=plot_config, plot_para=plot_para)
-        plot_driver.figure.show()          # 在交互环境显示
-        plot_driver.save2img("./result/test.png")
-    else:
-        CAnimateDriver(chan_snapshot, plot_config=plot_config, plot_para=plot_para)
+        # 使用 plotly 引擎绘图
+    CPlotDriver = get_plot_driver("plotly")
+    plot_driver = CPlotDriver(chan_snapshot, plot_config=plot_config, plot_para=plot_para)
+    plot_driver.show()
+    plot_driver.save2img("./result/test3.html")
