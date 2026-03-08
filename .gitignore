@@ -9,4 +9,6 @@ OpenConfig.yaml
 gotify_push.py
 cos_config.yaml
 result/
+Debug/backup*
 btc_data/
+Backtest/

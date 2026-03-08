@@ -676,7 +676,7 @@ class AkshareGUI(QMainWindow):
             return
 
         try:
-            from Plot.PlotDriver import CPlotDriver
+            from Plot.mpl.PlotDriver import CPlotDriver
 
             # 关闭旧的 figure 释放内存
             plt.close('all')
