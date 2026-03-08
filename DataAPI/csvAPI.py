@@ -74,8 +74,8 @@ class CSV_API(CCommonStockApi):
                         ErrCode.SRC_DATA_FORMAT_ERROR
                     )
 
-                # 只取前6列
-                row = raw[:6]
+                # 只取前7列
+                row = raw[:7]
 
                 # 时间解析
                 ktime = self.parse_time_column(row[0])
