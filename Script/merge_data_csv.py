@@ -10,7 +10,7 @@ BASE_DIR = "./btc_data"     # 数据根目录
 
 MODE = "monthly"            # "monthly" 或 "daily"
 SYMBOL = "BTCUSDT"          # 交易对
-INTERVAL = "1h"            # 周期: 1m/5m/15m/1h/4h/1d 等
+INTERVAL = "15m"            # 周期: 1m/5m/15m/1h/4h/1d 等
 
 AUTO_OUTPUT_NAME = True     # 是否自动生成输出文件名
 CUSTOM_OUTPUT_FILE = None   # 若 AUTO_OUTPUT_NAME=False，则使用这个
