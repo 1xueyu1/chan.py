@@ -23,6 +23,7 @@ class CKLine_Unit:
         self.open = kl_dict[DATA_FIELD.FIELD_OPEN]
         self.high = kl_dict[DATA_FIELD.FIELD_HIGH]
         self.low = kl_dict[DATA_FIELD.FIELD_LOW]
+        self.vol = kl_dict[DATA_FIELD.FIELD_VOLUME]
 
         self.check(autofix)
 
@@ -36,8 +37,8 @@ class CKLine_Unit:
         from KLine.KLine import CKLine
         self.__klc: Optional[CKLine] = None  # 指向KLine
 
-        # self.macd: Optional[CMACD_item] = None
-        # self.boll: Optional[BOLL_Metric] = None
+        self.macd: Optional[CMACD_item] = None
+        self.boll: Optional[BOLL_Metric] = None
         self.trend: Dict[TREND_TYPE, Dict[int, float]] = {}  # int -> float
 
         self.limit_flag = 0  # 0:普通 -1:跌停，1:涨停
