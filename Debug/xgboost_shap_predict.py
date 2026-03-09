@@ -393,6 +393,7 @@ if __name__ == "__main__":
             klu=last_klu,
             history=cur_lv_chan.lst,
             chan=cur_lv_chan,
+            bsp=last_bsp,
         )
         last_bsp.features.add_feat(extra_feat)
 

@@ -21,16 +21,15 @@ XGBoost + SHAP V3 训练流程 — 双模型 (买点/卖点质量评估)
   1. 双模型架构: 买点模型 + 卖点模型, 各自独立训练
   2. BSP 类型分类: 1/2/3类独热编码, 每个模型区分三类买卖点
   3. 方向解耦: 移除 is_buy_signal 特征, 由模型本身隐含方向
-  4. 相关性过滤: 移除 |corr| > 0.85 的冗余特征 + 低方差特征
-  5. 抗过拟合: scale_pos_weight, 增强正则化, 特征精简
-  6. 时间序列切分: TimeSeriesSplit 交叉验证
+  4. 抗过拟合: scale_pos_weight, 增强正则化, 特征精简
+  5. 时间序列切分: TimeSeriesSplit 交叉验证
+  6. 特征筛选由用户在 feature_center.py 中手动管理
 
 输出 (每个方向各一套):
   - Debug/model_buy.json / model_sell.json         XGBoost 模型
-  - Debug/meta_buy.json / meta_sell.json           特征元数据 (过滤后)
+  - Debug/meta_buy.json / meta_sell.json           特征元数据
   - Debug/shap_report_buy.html / ..._sell.html     SHAP 报告
   - Debug/metrics_buy.json / ..._sell.json         训练指标
-  - Debug/filter_log_buy.json / ..._sell.json      特征过滤日志
 ============================================================
 """
 
@@ -79,7 +78,7 @@ XGB_PARAMS = {
     "subsample": 0.8,
     "colsample_bytree": 0.7,    # V1=0.8, 减少每棵树使用的特征比例
     "objective": "binary:logistic",
-    "eval_metric": "auc",
+    "eval_metric": "aucpr",
     "min_child_weight": 10,     # V1=5, 要求更多样本才分裂
     "gamma": 0.3,               # V1=0.1, 分裂最小增益
     "reg_alpha": 0.5,           # V1=0.1, L1 正则化
@@ -90,13 +89,8 @@ XGB_PARAMS = {
 NUM_BOOST_ROUND = 300           # V1=200
 EARLY_STOPPING_ROUNDS = 30      # V1=20
 
-# 特征过滤阈值
-CORR_THRESHOLD = 0.85           # 高相关性移除阈值
-LOW_VAR_THRESHOLD = 0.005       # 低方差移除阈值 (标准差)
-HIGH_NAN_THRESHOLD = 0.90       # NaN 比例超过此值则移除
-
 # 买卖点质量阈值: 到下一个相反买卖点时, 涨跌幅 >= 此值才标为"合格"
-QUALIFIED_THRESHOLD = 0.02      # 2%
+QUALIFIED_THRESHOLD = 0.015     # 1.5%
 
 # 缠论配置
 CHAN_CONFIG = {
@@ -123,7 +117,6 @@ META_BUY_PATH = os.path.join(OUTPUT_DIR, "meta_buy.json")
 REPORT_BUY_PATH = os.path.join(OUTPUT_DIR, "shap_report_buy.html")
 METRICS_BUY_PATH = os.path.join(OUTPUT_DIR, "metrics_buy.json")
 LIBSVM_BUY_PATH = os.path.join(OUTPUT_DIR, "feature_buy.libsvm")
-FILTER_LOG_BUY_PATH = os.path.join(OUTPUT_DIR, "filter_log_buy.json")
 
 # 卖点模型输出
 MODEL_SELL_PATH = os.path.join(OUTPUT_DIR, "model_sell.json")
@@ -131,7 +124,6 @@ META_SELL_PATH = os.path.join(OUTPUT_DIR, "meta_sell.json")
 REPORT_SELL_PATH = os.path.join(OUTPUT_DIR, "shap_report_sell.html")
 METRICS_SELL_PATH = os.path.join(OUTPUT_DIR, "metrics_sell.json")
 LIBSVM_SELL_PATH = os.path.join(OUTPUT_DIR, "feature_sell.libsvm")
-FILTER_LOG_SELL_PATH = os.path.join(OUTPUT_DIR, "filter_log_sell.json")
 
 
 # ============================================================
@@ -207,6 +199,7 @@ def collect_features():
             klu=last_klu,
             history=cur_lv_chan.lst,
             chan=cur_lv_chan,
+            bsp=last_bsp,
         )
         last_bsp.features.add_feat(extra_feat)
 
@@ -403,116 +396,7 @@ def build_dataset(labeled_samples, direction_name=""):
 
 
 # ============================================================
-# 阶段四: 特征过滤 (低方差 + 高相关)
-# ============================================================
-
-def filter_features(X, feature_names, direction_name=""):
-    """
-    1. 移除 NaN 占比 > 90% 的特征
-    2. 移除低方差特征 (std < threshold)
-    3. 移除高相关特征 (|corr| > threshold, 保留方差大的)
-    """
-    print("\n" + "=" * 60)
-    print(f"[阶段4] 特征过滤 [{direction_name}]")
-    print("=" * 60)
-
-    filter_log = {
-        "original_count": len(feature_names),
-        "low_variance_removed": [],
-        "correlated_removed": [],
-    }
-
-    # ── Step 1: 低方差 + 高 NaN 过滤 ──
-    stds = np.nanstd(X, axis=0)
-    nan_ratios = np.isnan(X).mean(axis=0)
-
-    keep_mask = (stds >= LOW_VAR_THRESHOLD) & (nan_ratios < HIGH_NAN_THRESHOLD)
-
-    removed_lv = []
-    for i, (name, keep) in enumerate(zip(feature_names, keep_mask)):
-        if not keep:
-            removed_lv.append({
-                "name": name,
-                "std": round(float(stds[i]), 6),
-                "nan_ratio": round(float(nan_ratios[i]), 4),
-            })
-    filter_log["low_variance_removed"] = removed_lv
-
-    n_before = len(feature_names)
-    X = X[:, keep_mask]
-    feature_names = [f for f, m in zip(feature_names, keep_mask) if m]
-
-    print(f"  Step 1 低方差/高NaN: 移除 {n_before - len(feature_names)} 个 "
-          f"({n_before} → {len(feature_names)})")
-    if removed_lv:
-        for item in removed_lv[:5]:
-            print(f"    - {item['name']} (std={item['std']:.4f}, nan={item['nan_ratio']:.1%})")
-        if len(removed_lv) > 5:
-            print(f"    ... 等共 {len(removed_lv)} 个")
-
-    # ── Step 2: 高相关过滤 ──
-    n = X.shape[1]
-    to_remove = set()
-
-    for i in range(n):
-        if i in to_remove:
-            continue
-        for j in range(i + 1, n):
-            if j in to_remove:
-                continue
-
-            xi, xj = X[:, i], X[:, j]
-            valid = ~(np.isnan(xi) | np.isnan(xj))
-            if valid.sum() < 30:
-                continue
-
-            try:
-                corr_val = np.corrcoef(xi[valid], xj[valid])[0, 1]
-            except Exception:
-                continue
-
-            if np.isnan(corr_val):
-                continue
-
-            if abs(corr_val) > CORR_THRESHOLD:
-                var_i = float(np.nanvar(xi))
-                var_j = float(np.nanvar(xj))
-                if var_i >= var_j:
-                    to_remove.add(j)
-                    filter_log["correlated_removed"].append({
-                        "removed": feature_names[j],
-                        "kept": feature_names[i],
-                        "corr": round(float(corr_val), 4),
-                    })
-                else:
-                    to_remove.add(i)
-                    filter_log["correlated_removed"].append({
-                        "removed": feature_names[i],
-                        "kept": feature_names[j],
-                        "corr": round(float(corr_val), 4),
-                    })
-                    break  # i 已被移除, 跳出内层
-
-    n_corr = len(to_remove)
-    corr_mask = [i not in to_remove for i in range(n)]
-    X = X[:, corr_mask]
-    feature_names = [f for f, m in zip(feature_names, corr_mask) if m]
-
-    print(f"  Step 2 高相关: 移除 {n_corr} 个 (→ {len(feature_names)} 剩余)")
-    if filter_log["correlated_removed"]:
-        for item in filter_log["correlated_removed"][:5]:
-            print(f"    - {item['removed']} ↔ {item['kept']} (r={item['corr']})")
-        if len(filter_log["correlated_removed"]) > 5:
-            print(f"    ... 等共 {len(filter_log['correlated_removed'])} 对")
-
-    filter_log["final_count"] = len(feature_names)
-    filter_log["final_features"] = feature_names
-
-    return X, feature_names, filter_log
-
-
-# ============================================================
-# 阶段五: 训练 + 评估
+# 阶段四: 训练 + 评估
 # ============================================================
 
 def train_and_evaluate(X, y, feature_names, model_path, metrics_path, direction_name=""):
@@ -520,7 +404,7 @@ def train_and_evaluate(X, y, feature_names, model_path, metrics_path, direction_
     时间序列拆分 → XGBoost (scale_pos_weight + 增强正则化) → 评估
     """
     print("\n" + "=" * 60)
-    print(f"[阶段5] 模型训练与评估 [{direction_name}]")
+    print(f"[阶段4] 模型训练与评估 [{direction_name}]")
     print("=" * 60)
 
     split_idx = int(len(y) * TRAIN_RATIO)
@@ -571,8 +455,8 @@ def train_and_evaluate(X, y, feature_names, model_path, metrics_path, direction_
         "Train_Samples": int(len(y_train)),
         "Test_Samples": int(len(y_test)),
         "Best_Iteration": int(bst.best_iteration) if hasattr(bst, "best_iteration") else NUM_BOOST_ROUND,
-        "Best_AUC_Train": float(max(evals_result["train"]["auc"])),
-        "Best_AUC_Test": float(max(evals_result["test"]["auc"])),
+        "Best_AUC_Train": float(max(evals_result["train"]["aucpr"])),
+        "Best_AUC_Test": float(max(evals_result["test"]["aucpr"])),
         "scale_pos_weight": round(scale_pw, 4),
         "n_features": len(feature_names),
     }
@@ -598,13 +482,13 @@ def train_and_evaluate(X, y, feature_names, model_path, metrics_path, direction_
 
 
 # ============================================================
-# 阶段六: SHAP 分析
+# 阶段五: SHAP 分析
 # ============================================================
 
 def shap_analysis(bst, X, y, feature_names, metrics, report_path, direction_name=""):
     """SHAP TreeExplainer + 报告"""
     print("\n" + "=" * 60)
-    print(f"[阶段6] SHAP 可解释性分析 [{direction_name}]")
+    print(f"[阶段5] SHAP 可解释性分析 [{direction_name}]")
     print("=" * 60)
 
     analyzer = SHAPAnalyzer(model=bst, feature_names=feature_names)
@@ -631,7 +515,7 @@ def shap_analysis(bst, X, y, feature_names, metrics, report_path, direction_name
 
 
 # ============================================================
-# 阶段七: 时间序列交叉验证
+# 阶段六: 时间序列交叉验证
 # ============================================================
 
 def time_series_cv(X, y, feature_names, direction_name=""):
@@ -640,7 +524,7 @@ def time_series_cv(X, y, feature_names, direction_name=""):
     (expanding window, 每折动态调整 scale_pos_weight)
     """
     print("\n" + "=" * 60)
-    print(f"[阶段7] TimeSeriesSplit 交叉验证 [{direction_name}]")
+    print(f"[阶段6] TimeSeriesSplit 交叉验证 [{direction_name}]")
     print("=" * 60)
 
     tscv = TimeSeriesSplit(n_splits=5)
@@ -688,10 +572,10 @@ def time_series_cv(X, y, feature_names, direction_name=""):
 
 def train_direction_pipeline(labeled_samples, direction_name, model_path,
                              meta_path, report_path, metrics_path,
-                             libsvm_path, filter_log_path):
+                             libsvm_path):
     """
     对一个方向 (买点/卖点) 执行完整训练流水线:
-      构建数据集 → 特征过滤 → 保存 Meta/LibSVM → 训练 → SHAP → CV
+      构建数据集 → 保存 Meta/LibSVM → 训练 → SHAP → CV
     """
     print("\n")
     print("▓" * 60)
@@ -707,21 +591,11 @@ def train_direction_pipeline(labeled_samples, direction_name, model_path,
         labeled_samples, direction_name=direction_name
     )
 
-    # 4. 特征过滤
-    X, feature_names, filter_log = filter_features(
-        X, feature_names, direction_name=direction_name
-    )
-
-    # 保存过滤后的 meta
+    # 保存 meta
     new_meta = {name: i for i, name in enumerate(feature_names)}
     with open(meta_path, "w") as f:
         json.dump(new_meta, f, indent=2)
     print(f"  ✓ Meta 已保存: {meta_path} ({len(new_meta)} 特征)")
-
-    # 保存过滤日志
-    with open(filter_log_path, "w") as f:
-        json.dump(filter_log, f, indent=2, ensure_ascii=False)
-    print(f"  ✓ 过滤日志: {filter_log_path}")
 
     # 保存 libsvm
     with open(libsvm_path, "w") as fid:
@@ -734,7 +608,7 @@ def train_direction_pipeline(labeled_samples, direction_name, model_path,
             fid.write(f"{y[i]} " + " ".join(f"{idx}:{val}" for idx, val in pairs) + "\n")
     print(f"  ✓ LibSVM: {libsvm_path}")
 
-    # 5. 训练 + 评估
+    # 4. 训练 + 评估
     bst, metrics, evals_result, splits = train_and_evaluate(
         X, y, feature_names,
         model_path=model_path,
@@ -742,14 +616,14 @@ def train_direction_pipeline(labeled_samples, direction_name, model_path,
         direction_name=direction_name,
     )
 
-    # 6. SHAP 分析
+    # 5. SHAP 分析
     shap_result = shap_analysis(
         bst, X, y, feature_names, metrics,
         report_path=report_path,
         direction_name=direction_name,
     )
 
-    # 7. 时间序列交叉验证
+    # 6. 时间序列交叉验证
     try:
         cv_aucs = time_series_cv(X, y, feature_names, direction_name=direction_name)
     except Exception as e:
@@ -772,7 +646,7 @@ if __name__ == "__main__":
 
     print("\n" + "★" * 60)
     print("   XGBoost + SHAP V3 训练流程 — 双模型 (买点/卖点质量评估)")
-    print("   [买卖点质量 + BSP类型分类 + 相关性过滤 + 抗过拟合]")
+    print("   [买卖点质量 + BSP类型分类 + 抗过拟合]")
     print("★" * 60)
 
     # 1. 收集 BSP 特征
@@ -803,7 +677,6 @@ if __name__ == "__main__":
         report_path=REPORT_BUY_PATH,
         metrics_path=METRICS_BUY_PATH,
         libsvm_path=LIBSVM_BUY_PATH,
-        filter_log_path=FILTER_LOG_BUY_PATH,
     )
 
     # ── 卖点模型训练 ──
@@ -815,7 +688,6 @@ if __name__ == "__main__":
         report_path=REPORT_SELL_PATH,
         metrics_path=METRICS_SELL_PATH,
         libsvm_path=LIBSVM_SELL_PATH,
-        filter_log_path=FILTER_LOG_SELL_PATH,
     )
 
     # 完成
