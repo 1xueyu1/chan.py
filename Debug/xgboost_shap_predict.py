@@ -11,11 +11,14 @@ XGBoost + SHAP V3 实时推理与单样本解释 — 双模型 (买点/卖点质
 
 import json
 import os
+import sys
 import time
 from typing import Dict, List
 
 import numpy as np
 import xgboost as xgb
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from BuySellPoint.BS_Point import CBS_Point
 from Chan import CChan
@@ -77,8 +80,8 @@ class PredictionResult:
 CODE = "BTCUSDT"
 BEGIN_TIME = "2025-01-01"
 END_TIME = "2026-02-07"
-DATA_SRC_TYPE = DATA_SRC.CSV
 LV_LIST = [KL_TYPE.K_15M]
+DATA_SRC_TYPE = DATA_SRC.PARQUET
 
 MODEL_BUY_PATH = "Debug/model_buy.json"
 MODEL_SELL_PATH = "Debug/model_sell.json"
@@ -359,7 +362,7 @@ if __name__ == "__main__":
     config = CChanConfig(CHAN_CONFIG)
     chan = CChan(
         code=CODE, begin_time=BEGIN_TIME, end_time=END_TIME,
-        data_src=DATA_SRC_TYPE, lv_list=LV_LIST, config=config, autype=AUTYPE.QFQ,
+        data_src=DATA_SRC_TYPE, lv_list=LV_LIST, config=config, autype=AUTYPE.NONE,
     )
 
     # 3. 逐步推理
@@ -393,7 +396,6 @@ if __name__ == "__main__":
             klu=last_klu,
             history=cur_lv_chan.lst,
             chan=cur_lv_chan,
-            bsp=last_bsp,
         )
         last_bsp.features.add_feat(extra_feat)
 

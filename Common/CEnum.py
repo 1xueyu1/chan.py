@@ -12,6 +12,7 @@ class DATA_SRC(Enum):
     BAO_STOCK = auto()
     CCXT = auto()
     CSV = auto()
+    PARQUET = auto()
     AKSHARE = auto()
 
 

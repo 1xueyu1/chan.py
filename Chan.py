@@ -222,6 +222,9 @@ class CChan:
         elif self.data_src == DATA_SRC.CSV:
             from DataAPI.csvAPI import CSV_API
             _dict[DATA_SRC.CSV] = CSV_API
+        elif self.data_src == DATA_SRC.PARQUET:
+            from DataAPI.parquetAPI import PARQUET_API
+            _dict[DATA_SRC.PARQUET] = PARQUET_API
         elif self.data_src == DATA_SRC.AKSHARE:
             from DataAPI.AkshareAPI import CAkshare
             _dict[DATA_SRC.AKSHARE] = CAkshare
