@@ -511,67 +511,72 @@ def _render_html_report(
     per_symbol_metrics: Optional[List[Dict[str, object]]] = None,
     trade_events: Optional[List[ScoredSignalEvent]] = None,
     report_params: Optional[Dict[str, Any]] = None,
+    include_plotly_chart: bool = True,
+    include_trade_table: bool = True,
 ) -> str:
-    try:
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
+    if include_plotly_chart:
+        try:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
 
-        period_returns = equity_curve.pct_change().fillna(0.0) * 100.0
-        period_return_colors = ["#159895" if x >= 0 else "#c44536" for x in period_returns.values]
+            period_returns = equity_curve.pct_change().fillna(0.0) * 100.0
+            period_return_colors = ["#159895" if x >= 0 else "#c44536" for x in period_returns.values]
 
-        fig = make_subplots(
-            rows=3,
-            cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.06,
-            subplot_titles=("资金曲线", "回撤曲线", "单周期收益率（%）"),
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=equity_curve.index,
-                y=equity_curve.values,
-                mode="lines",
-                name="资金曲线",
-                line={"color": "#1f6f8b", "width": 2.2},
-            ),
-            row=1,
-            col=1,
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=drawdown_curve.index,
-                y=drawdown_curve.values * 100.0,
-                mode="lines",
-                fill="tozeroy",
-                name="回撤",
-                line={"color": "#b23a48", "width": 2.0},
-            ),
-            row=2,
-            col=1,
-        )
-        fig.add_trace(
-            go.Bar(
-                x=period_returns.index,
-                y=period_returns.values,
-                name="单周期收益率",
-                marker={"color": period_return_colors},
-            ),
-            row=3,
-            col=1,
-        )
-        fig.update_layout(
-            height=1020,
-            template="plotly_white",
-            title={"text": report_title, "x": 0.02, "xanchor": "left"},
-            margin={"l": 40, "r": 24, "t": 80, "b": 36},
-            showlegend=False,
-        )
-        fig.update_yaxes(title_text="权益", row=1, col=1)
-        fig.update_yaxes(title_text="回撤(%)", row=2, col=1)
-        fig.update_yaxes(title_text="收益率(%)", row=3, col=1)
-        fig_html = fig.to_html(full_html=False, include_plotlyjs="cdn")
-    except Exception:
-        fig_html = "<p class='hint'>未检测到 Plotly，已跳过图表绘制。</p>"
+            fig = make_subplots(
+                rows=3,
+                cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.06,
+                subplot_titles=("资金曲线", "回撤曲线", "单周期收益率（%）"),
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=equity_curve.index,
+                    y=equity_curve.values,
+                    mode="lines",
+                    name="资金曲线",
+                    line={"color": "#1f6f8b", "width": 2.2},
+                ),
+                row=1,
+                col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=drawdown_curve.index,
+                    y=drawdown_curve.values * 100.0,
+                    mode="lines",
+                    fill="tozeroy",
+                    name="回撤",
+                    line={"color": "#b23a48", "width": 2.0},
+                ),
+                row=2,
+                col=1,
+            )
+            fig.add_trace(
+                go.Bar(
+                    x=period_returns.index,
+                    y=period_returns.values,
+                    name="单周期收益率",
+                    marker={"color": period_return_colors},
+                ),
+                row=3,
+                col=1,
+            )
+            fig.update_layout(
+                height=1020,
+                template="plotly_white",
+                title={"text": report_title, "x": 0.02, "xanchor": "left"},
+                margin={"l": 40, "r": 24, "t": 80, "b": 36},
+                showlegend=False,
+            )
+            fig.update_yaxes(title_text="权益", row=1, col=1)
+            fig.update_yaxes(title_text="回撤(%)", row=2, col=1)
+            fig.update_yaxes(title_text="收益率(%)", row=3, col=1)
+            fig_html = fig.to_html(full_html=False, include_plotlyjs="cdn")
+        except Exception:
+            fig_html = "<p class='hint'>未检测到 Plotly，已跳过图表绘制。</p>"
+    else:
+        fig_html = "<p class='hint'>当前为 summary 报告，已跳过图表与交易明细以降低体积与生成耗时。</p>"
 
     kpi_cards: List[str] = []
     for key in _KPI_ORDER:
@@ -635,7 +640,7 @@ def _render_html_report(
         )
 
     params_table = _render_params_table(report_params)
-    trade_table = _render_trade_table(trade_events)
+    trade_table = _render_trade_table(trade_events) if include_trade_table else ""
 
     return (
         "<!doctype html>"
@@ -721,6 +726,7 @@ def write_outputs(
     save_bars_csv: bool,
     save_metrics_json_flag: bool,
     save_html_report_flag: bool,
+    save_html_detail_report_flag: bool,
     report_params: Optional[Dict[str, Any]] = None,
 ) -> BacktestArtifacts:
     out = ensure_output_dir(output_dir)
@@ -729,6 +735,7 @@ def write_outputs(
     bars_path = out / "model_signal_bars.csv"
     metrics_path = out / "backtest_metrics.json"
     report_path = out / "xgb_backtest_report.html"
+    report_detail_path = out / "xgb_backtest_report_detail.html"
 
     all_events = []
     for item in per_symbol:
@@ -755,7 +762,7 @@ def write_outputs(
         }
         save_metrics_json(metrics_path, payload)
 
-    if save_html_report_flag:
+    if save_html_report_flag or save_html_detail_report_flag:
         if len(per_symbol) == 1:
             eq = per_symbol[0].equity_curve
             dd = per_symbol[0].drawdown_curve
@@ -772,20 +779,38 @@ def write_outputs(
             }
             for item in per_symbol
         ]
-        html = _render_html_report(
-            report_title="Chan 策略回测报告（XGBoost + SHAP）",
-            metrics=aggregate_metrics,
-            equity_curve=eq,
-            drawdown_curve=dd,
-            per_symbol_metrics=per_symbol_metrics,
-            trade_events=all_events,
-            report_params=report_params,
-        )
-        report_path.write_text(html, encoding="utf-8")
+        if save_html_report_flag:
+            summary_html = _render_html_report(
+                report_title="Chan 策略回测报告（Summary）",
+                metrics=aggregate_metrics,
+                equity_curve=eq,
+                drawdown_curve=dd,
+                per_symbol_metrics=per_symbol_metrics,
+                trade_events=None,
+                report_params=report_params,
+                include_plotly_chart=False,
+                include_trade_table=False,
+            )
+            report_path.write_text(summary_html, encoding="utf-8")
+
+        if save_html_detail_report_flag:
+            detail_html = _render_html_report(
+                report_title="Chan 策略回测报告（Detail, XGBoost + SHAP）",
+                metrics=aggregate_metrics,
+                equity_curve=eq,
+                drawdown_curve=dd,
+                per_symbol_metrics=per_symbol_metrics,
+                trade_events=all_events,
+                report_params=report_params,
+                include_plotly_chart=True,
+                include_trade_table=True,
+            )
+            report_detail_path.write_text(detail_html, encoding="utf-8")
 
     return BacktestArtifacts(
         events_csv=events_path,
         bars_csv=bars_path,
         metrics_json=metrics_path,
         report_html=report_path,
+        report_detail_html=(report_detail_path if save_html_detail_report_flag else None),
     )

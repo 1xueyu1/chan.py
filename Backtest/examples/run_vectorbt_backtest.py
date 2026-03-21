@@ -27,6 +27,8 @@ def main() -> None:
         print(f"  bars:    {result.artifacts.bars_csv}")
         print(f"  metrics: {result.artifacts.metrics_json}")
         print(f"  report:  {result.artifacts.report_html}")
+        if result.artifacts.report_detail_html is not None:
+            print(f"  report_detail:  {result.artifacts.report_detail_html}")
 
 
 if __name__ == "__main__":

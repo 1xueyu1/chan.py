@@ -71,6 +71,7 @@ class BacktestConfig:
     save_bars_csv: bool = True
     save_metrics_json: bool = True
     save_html_report: bool = True
+    save_html_detail_report: bool = False
 
     random_seed: int = 42
     chan_config: Dict[str, object] = field(default_factory=lambda: dict(DEFAULT_CHAN_CONFIG))
@@ -146,6 +147,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-bars-csv", action="store_true")
     parser.add_argument("--no-metrics-json", action="store_true")
     parser.add_argument("--no-html-report", action="store_true")
+    parser.add_argument(
+        "--save-html-detail-report",
+        action="store_true",
+        help="save detail html report with full charts/trade table (summary report is still saved by default)",
+    )
 
     return parser
 
@@ -175,6 +181,7 @@ def config_from_args(args: argparse.Namespace) -> BacktestConfig:
         save_bars_csv=not args.no_bars_csv,
         save_metrics_json=not args.no_metrics_json,
         save_html_report=not args.no_html_report,
+        save_html_detail_report=bool(args.save_html_detail_report) and (not args.no_html_report),
     )
     cfg.validate()
     return cfg

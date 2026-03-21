@@ -63,6 +63,7 @@ class BacktestArtifacts:
     bars_csv: Path
     metrics_json: Path
     report_html: Path
+    report_detail_html: Optional[Path] = None
 
 
 @dataclass

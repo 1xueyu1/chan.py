@@ -169,6 +169,7 @@ def run_vectorbt_backtest(
         save_bars_csv=config.save_bars_csv,
         save_metrics_json_flag=config.save_metrics_json,
         save_html_report_flag=config.save_html_report,
+        save_html_detail_report_flag=config.save_html_detail_report,
         report_params={
             "symbols": symbols,
             "begin_time": config.begin_time,
@@ -250,6 +251,8 @@ def run_chan_backtest_no_vnpy(
         cfg.event_replay_csv_path = str(kwargs["event_replay_csv_path"])
     if "replay_reapply_threshold" in kwargs:
         cfg.replay_reapply_threshold = bool(kwargs["replay_reapply_threshold"])
+    if "save_html_detail_report" in kwargs:
+        cfg.save_html_detail_report = bool(kwargs["save_html_detail_report"])
 
     result = run_vectorbt_backtest(cfg)
 
