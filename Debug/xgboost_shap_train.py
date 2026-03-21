@@ -20,6 +20,8 @@ XGBoost + SHAP 多币种训练流程 — 双模型 (买点/卖点质量评估)
 ============================================================
 """
 
+# flake8: noqa: E501, E402
+
 import argparse
 import json
 import multiprocessing as mp
@@ -86,8 +88,55 @@ NUM_BOOST_ROUND = 300
 EARLY_STOPPING_ROUNDS = 30
 
 CORR_THRESHOLD = 0.85
-LOW_VAR_THRESHOLD = 0.005
 HIGH_NAN_THRESHOLD = 0.90
+LOW_INFO_UNIQUE_THRESHOLD = 1
+LOW_INFO_DOMINANT_RATIO = 0.995
+
+FEATURE_PRUNE_MODE = "aggressive"
+MODEL_PRUNE_TOPK = 40
+MODEL_PRUNE_MIN_GAIN = 0.0
+MODEL_PRUNE_ROUNDS = 120
+
+CORE_FEATURE_ALLOWLIST = {
+    "momentum_5",
+    "price_acceleration",
+    "price_pos_20",
+    "price_ma20_dist",
+    "price_ma60_dist",
+    "ma20_ma60_cross",
+    "ma_trend_aligned",
+    "vol_ratio_20",
+    "vol_change",
+    "vol_amount_std_20",
+    "upper_shadow_ratio",
+    "lower_shadow_ratio",
+    "bar_range",
+    "bar_body_position",
+    "candle_strength",
+    "rsi_14",
+    "macd_hist",
+    "kdj_k",
+    "boll_bandwidth",
+    "atr_expanding",
+    "cci_value",
+    "bi_length",
+    "bi_return_ratio",
+    "bi_length_ratio",
+    "bi_macd_area",
+    "distance_to_zhongshu_center",
+    "zs_bi_count",
+    "zs_peak_range",
+    "seg_direction",
+    "seg_bi_count",
+}
+
+EXTRA_ALWAYS_KEEP_PREFIXES = (
+    "bsp",
+    "zs_",
+    "seg_",
+    "bi_",
+    "divergence_",
+)
 
 CHAN_CONFIG = {
     "trigger_step": True,
@@ -169,6 +218,8 @@ class TrainArgs:
     num_workers: int
     shap_sample_limit: int
     output_dir: str
+    feature_prune_mode: str
+    model_prune_topk: int
 
 
 def parse_args() -> TrainArgs:
@@ -204,6 +255,18 @@ def parse_args() -> TrainArgs:
         type=int,
         default=SHAP_SAMPLE_LIMIT,
     )
+    parser.add_argument(
+        "--feature-prune-mode",
+        choices=["off", "basic", "aggressive"],
+        default=FEATURE_PRUNE_MODE,
+        help="off=仅基础校验, basic=缺失+低信息+相关性, aggressive=额外按模型gain裁剪",
+    )
+    parser.add_argument(
+        "--model-prune-topk",
+        type=int,
+        default=MODEL_PRUNE_TOPK,
+        help="aggressive模式下按gain保留的最大特征数",
+    )
     parser.add_argument("--output-dir", default=OUTPUT_DIR)
     ns = parser.parse_args()
 
@@ -224,6 +287,8 @@ def parse_args() -> TrainArgs:
         num_workers=max(1, ns.num_workers),
         shap_sample_limit=max(100, ns.shap_sample_limit),
         output_dir=ns.output_dir,
+        feature_prune_mode=ns.feature_prune_mode,
+        model_prune_topk=max(10, ns.model_prune_topk),
     )
 
 
@@ -399,6 +464,20 @@ def safe_float(value) -> float:
         return float("nan")
 
 
+def _should_keep_feature_at_source(feat_name: str) -> bool:
+    if feat_name in CORE_FEATURE_ALLOWLIST:
+        return True
+    return feat_name.startswith(EXTRA_ALWAYS_KEEP_PREFIXES)
+
+
+def _prefilter_feature_map(feature_map: Dict[str, float]) -> Dict[str, float]:
+    return {
+        feat_name: feat_value
+        for feat_name, feat_value in feature_map.items()
+        if _should_keep_feature_at_source(feat_name)
+    }
+
+
 def collect_symbol_samples_worker(
     symbol: str,
     begin_time: str,
@@ -451,6 +530,7 @@ def collect_symbol_samples_worker(
             feat_name: safe_float(feat_value)
             for feat_name, feat_value in last_bsp.features.items()
         }
+        feature_map = _prefilter_feature_map(feature_map)
 
         raw_samples.append({
             "symbol": symbol,
@@ -525,15 +605,24 @@ def label_bsp_quality(
     sell_samples = []
     unpaired = 0
 
+    next_opposite_idx = [-1] * len(samples)
+    next_buy_idx = -1
+    next_sell_idx = -1
+
+    for i in range(len(samples) - 1, -1, -1):
+        if samples[i]["is_buy"]:
+            next_opposite_idx[i] = next_sell_idx
+            next_buy_idx = i
+        else:
+            next_opposite_idx[i] = next_buy_idx
+            next_sell_idx = i
+
     for i, bsp in enumerate(samples):
-        partner = None
-        for j in range(i + 1, len(samples)):
-            if samples[j]["is_buy"] != bsp["is_buy"]:
-                partner = samples[j]
-                break
-        if partner is None:
+        partner_idx = next_opposite_idx[i]
+        if partner_idx < 0:
             unpaired += 1
             continue
+        partner = samples[partner_idx]
 
         if bsp["is_buy"]:
             change_pct = (
@@ -604,7 +693,7 @@ def vectorize_samples(samples: List[Dict], feature_meta: Dict[str, int]):
         samples,
         key=lambda item: (item["open_ts"], item["symbol"], item["klu_idx"]),
     )
-    X = np.full((len(ordered), len(feature_meta)), np.nan, dtype=np.float64)
+    X = np.full((len(ordered), len(feature_meta)), np.nan, dtype=np.float32)
     y = np.zeros(len(ordered), dtype=np.int32)
     sample_info = []
 
@@ -636,78 +725,244 @@ def vectorize_samples(samples: List[Dict], feature_meta: Dict[str, int]):
     return X, y, sample_info
 
 
-def filter_features(X_train, X_test, feature_names, direction_name=""):
-    print("\n" + "=" * 60)
-    print(f"[阶段4] 特征过滤 [{direction_name}]")
-    print("=" * 60)
+def _low_info_filter(X_train, feature_names):
+    keep_mask = np.ones(len(feature_names), dtype=bool)
+    removed = []
 
-    filter_log = {
-        "original_count": len(feature_names),
-        "low_variance_removed": [],
-        "correlated_removed": [],
-    }
+    for idx, name in enumerate(feature_names):
+        col = X_train[:, idx]
+        valid = col[~np.isnan(col)]
+        nan_ratio = float(np.isnan(col).mean())
 
-    stds = np.nanstd(X_train, axis=0)
+        if nan_ratio >= HIGH_NAN_THRESHOLD:
+            keep_mask[idx] = False
+            removed.append(
+                {
+                    "name": name,
+                    "reason": "high_nan",
+                    "nan_ratio": round(nan_ratio, 4),
+                }
+            )
+            continue
+
+        if len(valid) == 0:
+            keep_mask[idx] = False
+            removed.append(
+                {
+                    "name": name,
+                    "reason": "all_nan",
+                    "nan_ratio": round(nan_ratio, 4),
+                }
+            )
+            continue
+
+        uniq, counts = np.unique(valid, return_counts=True)
+        if len(uniq) <= LOW_INFO_UNIQUE_THRESHOLD:
+            keep_mask[idx] = False
+            removed.append(
+                {
+                    "name": name,
+                    "reason": "constant",
+                    "unique": int(len(uniq)),
+                    "nan_ratio": round(nan_ratio, 4),
+                }
+            )
+            continue
+
+        dominant_ratio = float(counts.max() / len(valid))
+        if len(uniq) <= 8 and dominant_ratio >= LOW_INFO_DOMINANT_RATIO:
+            keep_mask[idx] = False
+            removed.append(
+                {
+                    "name": name,
+                    "reason": "near_constant",
+                    "dominant_ratio": round(dominant_ratio, 4),
+                    "unique": int(len(uniq)),
+                    "nan_ratio": round(nan_ratio, 4),
+                }
+            )
+
+    return keep_mask, removed
+
+
+def _correlation_filter(X_train, feature_names):
+    n_features = len(feature_names)
+    if n_features <= 1:
+        return np.ones(n_features, dtype=bool), []
+
+    df = pd.DataFrame(X_train, columns=feature_names)
+    corr_df = df.corr(method="spearman", min_periods=30).abs()
+
     nan_ratios = np.isnan(X_train).mean(axis=0)
-    keep_mask = (stds >= LOW_VAR_THRESHOLD) & (nan_ratios < HIGH_NAN_THRESHOLD)
+    variances = np.nanvar(X_train, axis=0)
 
-    removed_lv = []
-    for idx, (name, keep) in enumerate(zip(feature_names, keep_mask)):
-        if not keep:
-            removed_lv.append({
-                "name": name,
-                "std": round(float(stds[idx]), 6),
-                "nan_ratio": round(float(nan_ratios[idx]), 4),
-            })
-    filter_log["low_variance_removed"] = removed_lv
-
-    X_train = X_train[:, keep_mask]
-    X_test = X_test[:, keep_mask]
-    feature_names = [
-        name for name, keep in zip(feature_names, keep_mask) if keep
-    ]
-
-    n_features = X_train.shape[1]
     to_remove = set()
+    removed_pairs = []
+
     for i in range(n_features):
         if i in to_remove:
             continue
         for j in range(i + 1, n_features):
             if j in to_remove:
                 continue
-            xi, xj = X_train[:, i], X_train[:, j]
-            valid = ~(np.isnan(xi) | np.isnan(xj))
-            if valid.sum() < 30:
-                continue
-            corr_val = np.corrcoef(xi[valid], xj[valid])[0, 1]
-            if np.isnan(corr_val) or abs(corr_val) <= CORR_THRESHOLD:
-                continue
-            var_i = float(np.nanvar(xi))
-            var_j = float(np.nanvar(xj))
-            if var_i >= var_j:
-                to_remove.add(j)
-                removed_name, kept_name = feature_names[j], feature_names[i]
-            else:
-                to_remove.add(i)
-                removed_name, kept_name = feature_names[i], feature_names[j]
-                filter_log["correlated_removed"].append({
-                    "removed": removed_name,
-                    "kept": kept_name,
-                    "corr": round(float(corr_val), 4),
-                })
-                break
-            filter_log["correlated_removed"].append({
-                "removed": removed_name,
-                "kept": kept_name,
-                "corr": round(float(corr_val), 4),
-            })
 
-    corr_mask = [i not in to_remove for i in range(n_features)]
-    X_train = X_train[:, corr_mask]
-    X_test = X_test[:, corr_mask]
-    feature_names = [
-        name for name, keep in zip(feature_names, corr_mask) if keep
+            corr_val = corr_df.iat[i, j]
+            if np.isnan(corr_val) or corr_val <= CORR_THRESHOLD:
+                continue
+
+            # 优先保留缺失更少的特征；若相同则保留方差更大的特征。
+            score_i = (nan_ratios[i], -variances[i])
+            score_j = (nan_ratios[j], -variances[j])
+
+            if score_i <= score_j:
+                keep_idx, remove_idx = i, j
+            else:
+                keep_idx, remove_idx = j, i
+
+            to_remove.add(remove_idx)
+            removed_pairs.append(
+                {
+                    "removed": feature_names[remove_idx],
+                    "kept": feature_names[keep_idx],
+                    "corr": round(float(corr_val), 4),
+                }
+            )
+
+    keep_mask = np.array([i not in to_remove for i in range(n_features)], dtype=bool)
+    return keep_mask, removed_pairs
+
+
+def _model_gain_prune(
+    X_train,
+    y_train,
+    X_test,
+    y_test,
+    feature_names,
+    train_mode,
+    model_prune_topk,
+):
+    n_pos = int(y_train.sum())
+    n_neg = len(y_train) - n_pos
+    scale_pw = n_neg / max(n_pos, 1)
+
+    params = build_xgb_params(train_mode, scale_pw)
+    dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=feature_names, missing=np.nan)
+    dtest = xgb.DMatrix(X_test, label=y_test, feature_names=feature_names, missing=np.nan)
+
+    booster = xgb.train(
+        params,
+        dtrain=dtrain,
+        num_boost_round=MODEL_PRUNE_ROUNDS,
+        evals=[(dtest, "eval")],
+        early_stopping_rounds=20,
+        verbose_eval=False,
+    )
+
+    gain = booster.get_score(importance_type="gain")
+    gain_items = sorted(
+        [(name, float(gain.get(name, 0.0))) for name in feature_names],
+        key=lambda item: item[1],
+        reverse=True,
+    )
+
+    mandatory = {
+        name
+        for name in feature_names
+        if (name in CORE_FEATURE_ALLOWLIST or name.startswith(EXTRA_ALWAYS_KEEP_PREFIXES))
+    }
+
+    topk = min(max(10, model_prune_topk), len(feature_names))
+    min_keep = min(len(feature_names), max(20, topk // 2))
+
+    selected = []
+    selected_set = set()
+
+    for name in sorted(mandatory):
+        selected.append(name)
+        selected_set.add(name)
+
+    for name, g in gain_items:
+        if name in selected_set:
+            continue
+        if len(selected) >= topk and g <= MODEL_PRUNE_MIN_GAIN:
+            continue
+        selected.append(name)
+        selected_set.add(name)
+        if len(selected) >= topk:
+            break
+
+    if len(selected) < min_keep:
+        for name, _ in gain_items:
+            if name in selected_set:
+                continue
+            selected.append(name)
+            selected_set.add(name)
+            if len(selected) >= min_keep:
+                break
+
+    keep_mask = np.array([name in selected_set for name in feature_names], dtype=bool)
+    removed = [
+        {
+            "name": name,
+            "gain": round(float(g), 6),
+        }
+        for name, g in gain_items
+        if name not in selected_set
     ]
+    return keep_mask, removed
+
+
+def filter_features(
+    X_train,
+    y_train,
+    X_test,
+    y_test,
+    feature_names,
+    direction_name="",
+    train_mode="auto",
+    feature_prune_mode="basic",
+    model_prune_topk=40,
+):
+    print("\n" + "=" * 60)
+    print(f"[阶段4] 特征过滤 [{direction_name}] 模式={feature_prune_mode}")
+    print("=" * 60)
+
+    filter_log = {
+        "original_count": len(feature_names),
+        "feature_prune_mode": feature_prune_mode,
+        "low_info_removed": [],
+        "correlated_removed": [],
+        "model_gain_removed": [],
+    }
+
+    if feature_prune_mode != "off":
+        keep_mask, removed = _low_info_filter(X_train, feature_names)
+        filter_log["low_info_removed"] = removed
+        X_train = X_train[:, keep_mask]
+        X_test = X_test[:, keep_mask]
+        feature_names = [name for name, keep in zip(feature_names, keep_mask) if keep]
+
+    if feature_prune_mode in {"basic", "aggressive"} and len(feature_names) > 1:
+        keep_mask, removed = _correlation_filter(X_train, feature_names)
+        filter_log["correlated_removed"] = removed
+        X_train = X_train[:, keep_mask]
+        X_test = X_test[:, keep_mask]
+        feature_names = [name for name, keep in zip(feature_names, keep_mask) if keep]
+
+    if feature_prune_mode == "aggressive" and len(feature_names) > 10:
+        keep_mask, removed = _model_gain_prune(
+            X_train,
+            y_train,
+            X_test,
+            y_test,
+            feature_names,
+            train_mode,
+            model_prune_topk,
+        )
+        filter_log["model_gain_removed"] = removed
+        X_train = X_train[:, keep_mask]
+        X_test = X_test[:, keep_mask]
+        feature_names = [name for name, keep in zip(feature_names, keep_mask) if keep]
 
     filter_log["final_count"] = len(feature_names)
     filter_log["final_features"] = feature_names
@@ -1052,7 +1307,15 @@ def train_direction_pipeline(
     X_test, y_test, test_info = vectorize_samples(test_samples, feature_meta)
 
     X_train, X_test, feature_names, filter_log = filter_features(
-        X_train, X_test, feature_names, direction_name=direction_name
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+        feature_names,
+        direction_name=direction_name,
+        train_mode=args.train_mode,
+        feature_prune_mode=args.feature_prune_mode,
+        model_prune_topk=args.model_prune_topk,
     )
 
     filtered_meta = {name: idx for idx, name in enumerate(feature_names)}
@@ -1144,6 +1407,7 @@ def main():
     print(f"   训练币种({len(train_symbols)}): {', '.join(train_symbols)}")
     print(f"   保留币种({len(holdout_symbols)}): {', '.join(holdout_symbols)}")
     print(f"   训练模式: {args.train_mode}  并行进程: {args.num_workers}")
+    print(f"   特征过滤模式: {args.feature_prune_mode}  topk: {args.model_prune_topk}")
     print("★" * 60)
 
     start_time = time.time()

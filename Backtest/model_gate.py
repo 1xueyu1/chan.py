@@ -33,11 +33,15 @@ class DualModelGate:
         for name, idx in self.meta_sell.items():
             self.fnames_sell[idx] = name
 
-    def _vectorize(self, event: RawBSPEvent, is_buy: bool) -> tuple[np.ndarray, Dict[str, int], List[str]]:
+    def _vectorize(
+        self,
+        event: RawBSPEvent,
+        is_buy: bool,
+    ) -> tuple[np.ndarray, Dict[str, int], List[str]]:
         meta = self.meta_buy if is_buy else self.meta_sell
         fnames = self.fnames_buy if is_buy else self.fnames_sell
 
-        arr = np.full(len(meta), np.nan, dtype=np.float64)
+        arr = np.full(len(meta), np.nan, dtype=np.float32)
 
         if "bsp_type_1" in meta:
             arr[meta["bsp_type_1"]] = 1.0 if event.bsp_type == "1" else 0.0
@@ -56,7 +60,11 @@ class DualModelGate:
         is_buy = bool(event.is_buy)
         arr, _meta, fnames = self._vectorize(event, is_buy)
 
-        dmat = xgb.DMatrix(arr.reshape(1, -1), feature_names=fnames, missing=np.nan)
+        dmat = xgb.DMatrix(
+            arr.reshape(1, -1),
+            feature_names=fnames,
+            missing=np.nan,
+        )
         model = self.model_buy if is_buy else self.model_sell
         prob = float(model.predict(dmat)[0])
 
@@ -80,5 +88,8 @@ class DualModelGate:
             signal=signal,
         )
 
-    def score_events(self, events: List[RawBSPEvent]) -> List[ScoredSignalEvent]:
+    def score_events(
+        self,
+        events: List[RawBSPEvent],
+    ) -> List[ScoredSignalEvent]:
         return [self.score_event(ev) for ev in events]
