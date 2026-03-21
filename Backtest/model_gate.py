@@ -61,18 +61,34 @@ class DualModelGate:
         events: Sequence[RawBSPEvent],
         is_buy: bool,
     ) -> tuple[np.ndarray, List[str]]:
+        meta = self.meta_buy if is_buy else self.meta_sell
+        fnames = self.fnames_buy if is_buy else self.fnames_sell
+
         if not events:
-            meta = self.meta_buy if is_buy else self.meta_sell
-            fnames = self.fnames_buy if is_buy else self.fnames_sell
             return np.empty((0, len(meta)), dtype=np.float32), fnames
 
-        rows = []
-        fnames: List[str] = []
-        for ev in events:
-            arr, _meta, fnames = self._vectorize(ev, is_buy)
-            rows.append(arr)
+        matrix = np.full((len(events), len(meta)), np.nan, dtype=np.float32)
 
-        return np.vstack(rows).astype(np.float32, copy=False), fnames
+        if "bsp_type_1" in meta:
+            idx = meta["bsp_type_1"]
+            for row_idx, ev in enumerate(events):
+                matrix[row_idx, idx] = 1.0 if ev.bsp_type == "1" else 0.0
+        if "bsp_type_2" in meta:
+            idx = meta["bsp_type_2"]
+            for row_idx, ev in enumerate(events):
+                matrix[row_idx, idx] = 1.0 if ev.bsp_type == "2" else 0.0
+        if "bsp_type_3" in meta:
+            idx = meta["bsp_type_3"]
+            for row_idx, ev in enumerate(events):
+                matrix[row_idx, idx] = 1.0 if ev.bsp_type == "3" else 0.0
+
+        for row_idx, ev in enumerate(events):
+            for feat_name, feat_value in ev.feature_map.items():
+                col_idx = meta.get(feat_name)
+                if col_idx is not None:
+                    matrix[row_idx, col_idx] = feat_value
+
+        return matrix, fnames
 
     def _predict_batch(
         self,
