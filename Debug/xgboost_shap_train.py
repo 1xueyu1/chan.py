@@ -177,7 +177,11 @@ class TeeStream:
 
 def setup_train_log():
     project_root = Path(__file__).resolve().parents[1]
-    result_dir = project_root / "result"
+    configured_dir = os.environ.get("XGB_TRAIN_LOG_DIR", "").strip()
+    if configured_dir:
+        result_dir = Path(configured_dir)
+    else:
+        result_dir = project_root / "result"
     result_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = result_dir / f"xgb_train_{timestamp}.log"

@@ -9,6 +9,7 @@ XGBoost + SHAP V3 实时推理与单样本解释 — 双模型 (买点/卖点质
 ============================================================
 """
 
+import argparse
 import json
 import os
 import sys
@@ -109,6 +110,25 @@ PREDICT_REPORT_PATH = os.path.join(OUTPUT_DIR, "shap_predict_report.html")
 
 # 置信度阈值
 SIGNAL_THRESHOLD = 0.55
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="XGBoost + SHAP V3 实时推理")
+    parser.add_argument("--code", default=CODE)
+    parser.add_argument("--begin-time", default=BEGIN_TIME)
+    parser.add_argument("--end-time", default=END_TIME)
+    parser.add_argument("--model-buy-path", default=MODEL_BUY_PATH)
+    parser.add_argument("--model-sell-path", default=MODEL_SELL_PATH)
+    parser.add_argument("--meta-buy-path", default=META_BUY_PATH)
+    parser.add_argument("--meta-sell-path", default=META_SELL_PATH)
+    parser.add_argument("--output-dir", default=OUTPUT_DIR)
+    parser.add_argument("--report-path", default="")
+    parser.add_argument(
+        "--signal-threshold",
+        type=float,
+        default=SIGNAL_THRESHOLD,
+    )
+    return parser.parse_args()
 
 
 # ============================================================
@@ -323,6 +343,26 @@ def generate_predict_report(predictions, output_path):
 # ============================================================
 
 if __name__ == "__main__":
+    args = parse_args()
+
+    CODE = args.code
+    BEGIN_TIME = args.begin_time
+    END_TIME = args.end_time
+    MODEL_BUY_PATH = args.model_buy_path
+    MODEL_SELL_PATH = args.model_sell_path
+    META_BUY_PATH = args.meta_buy_path
+    META_SELL_PATH = args.meta_sell_path
+    OUTPUT_DIR = args.output_dir
+    SIGNAL_THRESHOLD = float(args.signal_threshold)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    if args.report_path:
+        PREDICT_REPORT_PATH = args.report_path
+    else:
+        PREDICT_REPORT_PATH = os.path.join(
+            OUTPUT_DIR,
+            "shap_predict_report.html",
+        )
+
     start_time = time.time()
 
     print("\n" + "★" * 60)
