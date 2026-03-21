@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Dict, List
+from typing import Dict, List, Sequence
 
 import numpy as np
 import xgboost as xgb
@@ -56,17 +56,45 @@ class DualModelGate:
 
         return arr, meta, fnames
 
-    def score_event(self, event: RawBSPEvent) -> ScoredSignalEvent:
-        is_buy = bool(event.is_buy)
-        arr, _meta, fnames = self._vectorize(event, is_buy)
+    def _vectorize_batch(
+        self,
+        events: Sequence[RawBSPEvent],
+        is_buy: bool,
+    ) -> tuple[np.ndarray, List[str]]:
+        if not events:
+            meta = self.meta_buy if is_buy else self.meta_sell
+            fnames = self.fnames_buy if is_buy else self.fnames_sell
+            return np.empty((0, len(meta)), dtype=np.float32), fnames
 
+        rows = []
+        fnames: List[str] = []
+        for ev in events:
+            arr, _meta, fnames = self._vectorize(ev, is_buy)
+            rows.append(arr)
+
+        return np.vstack(rows).astype(np.float32, copy=False), fnames
+
+    def _predict_batch(
+        self,
+        events: Sequence[RawBSPEvent],
+        is_buy: bool,
+    ) -> List[float]:
+        if not events:
+            return []
+
+        matrix, fnames = self._vectorize_batch(events, is_buy)
         dmat = xgb.DMatrix(
-            arr.reshape(1, -1),
+            matrix,
             feature_names=fnames,
             missing=np.nan,
         )
         model = self.model_buy if is_buy else self.model_sell
-        prob = float(model.predict(dmat)[0])
+        probs = model.predict(dmat)
+        return [float(x) for x in probs]
+
+    def score_event(self, event: RawBSPEvent) -> ScoredSignalEvent:
+        is_buy = bool(event.is_buy)
+        prob = self._predict_batch([event], is_buy)[0]
 
         qualified = prob >= self.config.signal_threshold
         if not qualified:
@@ -92,4 +120,56 @@ class DualModelGate:
         self,
         events: List[RawBSPEvent],
     ) -> List[ScoredSignalEvent]:
-        return [self.score_event(ev) for ev in events]
+        if not events:
+            return []
+
+        buy_idx: List[int] = []
+        sell_idx: List[int] = []
+        buy_events: List[RawBSPEvent] = []
+        sell_events: List[RawBSPEvent] = []
+
+        for idx, ev in enumerate(events):
+            if bool(ev.is_buy):
+                buy_idx.append(idx)
+                buy_events.append(ev)
+            else:
+                sell_idx.append(idx)
+                sell_events.append(ev)
+
+        buy_probs = self._predict_batch(buy_events, True)
+        sell_probs = self._predict_batch(sell_events, False)
+
+        probs: List[float] = [0.0] * len(events)
+        for i, idx in enumerate(buy_idx):
+            probs[idx] = buy_probs[i]
+        for i, idx in enumerate(sell_idx):
+            probs[idx] = sell_probs[i]
+
+        scored: List[ScoredSignalEvent] = []
+        threshold = self.config.signal_threshold
+
+        for idx, ev in enumerate(events):
+            prob = probs[idx]
+            qualified = prob >= threshold
+            if not qualified:
+                signal = 0
+            else:
+                signal = 1 if bool(ev.is_buy) else -1
+
+            scored.append(
+                ScoredSignalEvent(
+                    symbol=ev.symbol,
+                    exec_time=ev.exec_time,
+                    bsp_time=ev.bsp_time,
+                    is_buy=ev.is_buy,
+                    bsp_type=ev.bsp_type,
+                    bsp_types_str=ev.bsp_types_str,
+                    trade_price=ev.trade_price,
+                    klu_idx=ev.klu_idx,
+                    probability=prob,
+                    qualified=qualified,
+                    signal=signal,
+                )
+            )
+
+        return scored
