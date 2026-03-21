@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # flake8: noqa: E501
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -18,6 +19,45 @@ from .signal_builder import build_signal_matrix, validate_no_lookahead
 from .strategy import ChanStrategyBase
 from .types import BacktestRunResult, SymbolBacktestResult
 from .vectorbt_engine import metrics_from_equity_curve, run_vectorbt_for_symbol
+
+
+def _run_single_symbol_backtest(
+    config: BacktestConfig,
+    symbol: str,
+    replay_events_by_symbol: Optional[Dict[str, list]] = None,
+) -> SymbolBacktestResult:
+    bars = load_symbol_bars(config, symbol)
+    if config.event_replay_mode:
+        scored_events = list((replay_events_by_symbol or {}).get(symbol, []))
+    else:
+        gate = DualModelGate(config)
+        raw_events = extract_raw_bsp_events(config, symbol)
+        scored_events = gate.score_events(raw_events)
+
+    signal_matrix = build_signal_matrix(
+        bars_index=bars.index,
+        scored_events=scored_events,
+        allow_short=config.allow_short,
+        execution_mode=config.execution_mode,
+        conflict_policy=config.conflict_policy,
+    )
+    validate_no_lookahead(signal_matrix, config.execution_mode)
+
+    _pf, metrics, equity_curve, drawdown_curve = run_vectorbt_for_symbol(
+        config,
+        bars,
+        signal_matrix,
+    )
+
+    return SymbolBacktestResult(
+        symbol=symbol,
+        metrics=metrics,
+        signal_events=scored_events,
+        bars=bars,
+        signal_matrix=signal_matrix,
+        equity_curve=equity_curve,
+        drawdown_curve=drawdown_curve,
+    )
 
 
 def _aggregate_metrics(config: BacktestConfig, per_symbol: List[SymbolBacktestResult]) -> Dict[str, float]:
@@ -86,44 +126,39 @@ def run_vectorbt_backtest(
         raise NotImplementedError("Current implementation only supports DATA_SRC.PARQUET")
 
     replay_events_by_symbol = None
-    gate = None
     if config.event_replay_mode:
         replay_events_by_symbol = load_scored_events_by_symbol(config)
-    else:
-        gate = DualModelGate(config)
 
     per_symbol: List[SymbolBacktestResult] = []
+    symbols = config.normalized_symbols()
+    max_workers = min(config.symbol_workers, len(symbols))
 
-    for symbol in config.normalized_symbols():
-        bars = load_symbol_bars(config, symbol)
-        if config.event_replay_mode:
-            scored_events = list((replay_events_by_symbol or {}).get(symbol, []))
-        else:
-            raw_events = extract_raw_bsp_events(config, symbol)
-            scored_events = gate.score_events(raw_events)
-
-        signal_matrix = build_signal_matrix(
-            bars_index=bars.index,
-            scored_events=scored_events,
-            allow_short=config.allow_short,
-            execution_mode=config.execution_mode,
-            conflict_policy=config.conflict_policy,
-        )
-        validate_no_lookahead(signal_matrix, config.execution_mode)
-
-        _pf, metrics, equity_curve, drawdown_curve = run_vectorbt_for_symbol(config, bars, signal_matrix)
-
-        per_symbol.append(
-            SymbolBacktestResult(
-                symbol=symbol,
-                metrics=metrics,
-                signal_events=scored_events,
-                bars=bars,
-                signal_matrix=signal_matrix,
-                equity_curve=equity_curve,
-                drawdown_curve=drawdown_curve,
+    if max_workers == 1:
+        for symbol in symbols:
+            per_symbol.append(
+                _run_single_symbol_backtest(
+                    config,
+                    symbol,
+                    replay_events_by_symbol=replay_events_by_symbol,
+                )
             )
-        )
+    else:
+        result_by_symbol: Dict[str, SymbolBacktestResult] = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_map = {
+                pool.submit(
+                    _run_single_symbol_backtest,
+                    config,
+                    symbol,
+                    replay_events_by_symbol,
+                ): symbol
+                for symbol in symbols
+            }
+            for future in as_completed(future_map):
+                symbol = future_map[future]
+                result_by_symbol[symbol] = future.result()
+
+        per_symbol = [result_by_symbol[symbol] for symbol in symbols]
 
     aggregate_metrics = _aggregate_metrics(config, per_symbol)
     artifacts = write_outputs(
@@ -135,7 +170,7 @@ def run_vectorbt_backtest(
         save_metrics_json_flag=config.save_metrics_json,
         save_html_report_flag=config.save_html_report,
         report_params={
-            "symbols": config.normalized_symbols(),
+            "symbols": symbols,
             "begin_time": config.begin_time,
             "end_time": config.end_time,
             "kl_type": str(config.kl_type.name),

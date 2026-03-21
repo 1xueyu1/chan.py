@@ -55,6 +55,7 @@ class BacktestConfig:
     allow_short: bool = False
     execution_mode: str = "next_bar_open"
     conflict_policy: str = "exit_first"
+    symbol_workers: int = 1
 
     model_buy_path: str = "Debug/model_buy.json"
     model_sell_path: str = "Debug/model_sell.json"
@@ -99,6 +100,8 @@ class BacktestConfig:
             raise ValueError(f"unsupported kl_type: {self.kl_type}")
         if self.event_replay_mode and not self.event_replay_csv_path:
             raise ValueError("event_replay_csv_path is required in event_replay_mode")
+        if self.symbol_workers < 1:
+            raise ValueError("symbol_workers must be >= 1")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -115,6 +118,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--allow-short", action="store_true")
     parser.add_argument("--execution-mode", default="next_bar_open", choices=["next_bar_open", "close"])
+    parser.add_argument("--symbol-workers", type=int, default=1, help="parallel workers for symbol-level backtest execution")
 
     parser.add_argument("--model-buy-path", default="Debug/model_buy.json")
     parser.add_argument("--model-sell-path", default="Debug/model_sell.json")
@@ -158,6 +162,7 @@ def config_from_args(args: argparse.Namespace) -> BacktestConfig:
         signal_threshold=args.signal_threshold,
         allow_short=bool(args.allow_short),
         execution_mode=args.execution_mode,
+        symbol_workers=args.symbol_workers,
         model_buy_path=args.model_buy_path,
         model_sell_path=args.model_sell_path,
         meta_buy_path=args.meta_buy_path,
