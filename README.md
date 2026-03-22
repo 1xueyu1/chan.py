@@ -15,6 +15,8 @@
 
 - 讨论组：<a href="https://t.me/zen_python">Telegram</a>
 - [快速上手指南](./quick_guide.md)
+- [全流程产物归档与运行文档](./Debug/PIPELINE_USAGE.md)
+- [版本备份规范](./backup/README.md)
 
 
 **特别说明①**：当前公开部分代码暂时只包含基本的静态计算能力，暂未包含策略类，特征，模型，automl框架，交易引擎对接等；
@@ -25,6 +27,9 @@
 
 
 **特别说明②**：依赖最低版本为python3.11；由于本项目是高度计算密集型，鉴于python3.11发布且运算速度大幅提升，实测相比于python 3.8.5计算时间缩短约16%，故后续开发均基于python3.11；
+
+
+**特别说明③**：当前项目默认开发/测试环境为conda虚拟环境 `chan`，推荐使用解释器 `C:/Users/xueyu/anaconda3/envs/chan/python.exe` 运行所有脚本与回测；
 
 
 ---

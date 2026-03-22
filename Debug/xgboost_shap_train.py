@@ -69,6 +69,19 @@ TRAIN_MODE = "auto"
 NUM_WORKERS = max(1, (os.cpu_count() or 2) - 1)
 SHAP_SAMPLE_LIMIT = 5000
 
+DEFAULT_LABELING_STRATEGY = "original_return"
+DEFAULT_LABELING_NAME = "ChanLabelingSuite_v2"
+ENSEMBLE_MIN_VOTES = 3
+LABEL_MAX_HOLDING_BARS = 96
+
+LABELING_STRATEGIES = [
+    "original_return",
+    "chan_structure_invalidation",
+    "multicycle_resonance",
+    "divergence_focus",
+    "ensemble4_consensus",
+]
+
 PARQUET_REQUIRED_COLUMNS = ["open_time", "open", "high", "low", "close", "volume"]
 
 XGB_BASE_PARAMS = {
@@ -221,6 +234,10 @@ class TrainArgs:
     train_mode: str
     num_workers: int
     shap_sample_limit: int
+    labeling_strategy: str
+    labeling_name: str
+    ensemble_min_votes: int
+    label_max_holding_bars: int
     output_dir: str
     feature_prune_mode: str
     model_prune_topk: int
@@ -260,6 +277,29 @@ def parse_args() -> TrainArgs:
         default=SHAP_SAMPLE_LIMIT,
     )
     parser.add_argument(
+        "--labeling-strategy",
+        choices=LABELING_STRATEGIES,
+        default=DEFAULT_LABELING_STRATEGY,
+        help="标注策略：4种单策略 + 1种集成策略",
+    )
+    parser.add_argument(
+        "--labeling-name",
+        default=DEFAULT_LABELING_NAME,
+        help="标注方案名称（会写入指标文件）",
+    )
+    parser.add_argument(
+        "--ensemble-min-votes",
+        type=int,
+        default=ENSEMBLE_MIN_VOTES,
+        help="ensemble模式下判定为正例所需最少票数",
+    )
+    parser.add_argument(
+        "--label-max-holding-bars",
+        type=int,
+        default=LABEL_MAX_HOLDING_BARS,
+        help="标注中用于结构有效性评估的最大持有bar限制",
+    )
+    parser.add_argument(
         "--feature-prune-mode",
         choices=["off", "basic", "aggressive"],
         default=FEATURE_PRUNE_MODE,
@@ -290,6 +330,10 @@ def parse_args() -> TrainArgs:
         train_mode=ns.train_mode,
         num_workers=max(1, ns.num_workers),
         shap_sample_limit=max(100, ns.shap_sample_limit),
+        labeling_strategy=ns.labeling_strategy,
+        labeling_name=ns.labeling_name.strip() or DEFAULT_LABELING_NAME,
+        ensemble_min_votes=max(1, min(4, int(ns.ensemble_min_votes))),
+        label_max_holding_bars=max(1, int(ns.label_max_holding_bars)),
         output_dir=ns.output_dir,
         feature_prune_mode=ns.feature_prune_mode,
         model_prune_topk=max(10, ns.model_prune_topk),
@@ -452,12 +496,14 @@ def build_output_paths(output_dir: str):
         "metrics_buy": os.path.join(output_dir, "metrics_buy.json"),
         "libsvm_buy": os.path.join(output_dir, "feature_buy.libsvm"),
         "filter_buy": os.path.join(output_dir, "filter_log_buy.json"),
+        "label_records_buy": os.path.join(output_dir, "label_records_buy.csv"),
         "model_sell": os.path.join(output_dir, "model_sell.json"),
         "meta_sell": os.path.join(output_dir, "meta_sell.json"),
         "report_sell": os.path.join(output_dir, "shap_report_sell.html"),
         "metrics_sell": os.path.join(output_dir, "metrics_sell.json"),
         "libsvm_sell": os.path.join(output_dir, "feature_sell.libsvm"),
         "filter_sell": os.path.join(output_dir, "filter_log_sell.json"),
+        "label_records_sell": os.path.join(output_dir, "label_records_sell.csv"),
     }
 
 
@@ -491,6 +537,10 @@ def collect_symbol_samples_worker(
     qualified_threshold: float,
     split_ts: float,
     is_train_symbol: bool,
+    labeling_strategy: str,
+    labeling_name: str,
+    ensemble_min_votes: int,
+    label_max_holding_bars: int,
 ):
     config = CChanConfig(chan_config)
     chan = CChan(
@@ -561,12 +611,20 @@ def collect_symbol_samples_worker(
         qualified_threshold,
         partition="early_window",
         symbol_group="train_symbol" if is_train_symbol else "holdout_symbol",
+        labeling_strategy=labeling_strategy,
+        labeling_name=labeling_name,
+        ensemble_min_votes=ensemble_min_votes,
+        label_max_holding_bars=label_max_holding_bars,
     )
     late_buy, late_sell, late_stats = label_bsp_quality(
         late_segment,
         qualified_threshold,
         partition="late_window",
         symbol_group="train_symbol" if is_train_symbol else "holdout_symbol",
+        labeling_strategy=labeling_strategy,
+        labeling_name=labeling_name,
+        ensemble_min_votes=ensemble_min_votes,
+        label_max_holding_bars=label_max_holding_bars,
     )
 
     train_buy = early_buy if is_train_symbol else []
@@ -604,6 +662,10 @@ def label_bsp_quality(
     threshold: float,
     partition: str,
     symbol_group: str,
+    labeling_strategy: str,
+    labeling_name: str,
+    ensemble_min_votes: int,
+    label_max_holding_bars: int,
 ):
     buy_samples = []
     sell_samples = []
@@ -639,6 +701,98 @@ def label_bsp_quality(
                 / (bsp["trade_price"] + 1e-9)
             )
 
+        # Path-based stats between entry BSP and matched opposite BSP.
+        segment_prices = [
+            samples[k]["trade_price"]
+            for k in range(i, partner_idx + 1)
+            if samples[k]["trade_price"] > 0
+        ]
+        if not segment_prices:
+            segment_prices = [bsp["trade_price"], partner["trade_price"]]
+
+        entry_price = bsp["trade_price"] + 1e-9
+        if bsp["is_buy"]:
+            favorable_pct = (max(segment_prices) - bsp["trade_price"]) / entry_price
+            adverse_pct = (min(segment_prices) - bsp["trade_price"]) / entry_price
+        else:
+            favorable_pct = (bsp["trade_price"] - min(segment_prices)) / entry_price
+            adverse_pct = (bsp["trade_price"] - max(segment_prices)) / entry_price
+
+        holding_bars = partner["klu_idx"] - bsp["klu_idx"]
+
+        feat = bsp.get("feature", {})
+        seg_direction = safe_float(feat.get("seg_direction", 0.0))
+        ma_trend_aligned = safe_float(feat.get("ma_trend_aligned", 0.0))
+        zs_count = max(
+            safe_float(feat.get("zs_cnt", 0.0)),
+            safe_float(feat.get("zs_bi_count", 0.0)),
+        )
+        dist_to_zs_center = abs(safe_float(feat.get("distance_to_zhongshu_center", 0.0)))
+        momentum_5 = safe_float(feat.get("momentum_5", 0.0))
+        price_acceleration = safe_float(feat.get("price_acceleration", 0.0))
+        bi_macd_area = safe_float(feat.get("bi_macd_area", 0.0))
+        macd_hist = safe_float(feat.get("macd_hist", 0.0))
+        bi_return_ratio = safe_float(feat.get("bi_return_ratio", 0.0))
+
+        def strategy_original_return() -> int:
+            return int(change_pct >= threshold)
+
+        def strategy_chan_structure_invalidation() -> int:
+            structure_ok = (zs_count >= 1) or (bsp["bsp_main_type"] in {"1", "2"})
+            if bsp["is_buy"]:
+                trend_ok = (seg_direction >= 0) or (ma_trend_aligned >= 0.5)
+                invalid = (seg_direction < -0.2 and ma_trend_aligned < 0.2) or (bi_return_ratio < -2 * threshold)
+            else:
+                trend_ok = (seg_direction <= 0) or (ma_trend_aligned < 0.5)
+                invalid = (seg_direction > 0.2 and ma_trend_aligned > 0.8) or (bi_return_ratio > 2 * threshold)
+
+            # 若持有窗口过长，视为结构未在有效窗口内兑现。
+            time_ok = holding_bars <= label_max_holding_bars
+            return int(structure_ok and trend_ok and time_ok and (not invalid))
+
+        def strategy_multicycle_resonance() -> int:
+            higher_tf_trend = seg_direction
+            mid_tf_trend = (ma_trend_aligned * 2.0) - 1.0
+            local_tf_impulse = price_acceleration + 0.5 * momentum_5
+
+            if bsp["is_buy"]:
+                score = int(higher_tf_trend > 0) + int(mid_tf_trend > 0) + int(local_tf_impulse > 0) + int(dist_to_zs_center <= 2.0)
+            else:
+                score = int(higher_tf_trend < 0) + int(mid_tf_trend < 0) + int(local_tf_impulse < 0) + int(dist_to_zs_center <= 2.0)
+            return int(score >= 3)
+
+        def strategy_divergence_focus() -> int:
+            div_values = [
+                safe_float(v)
+                for k, v in feat.items()
+                if "divergence" in str(k).lower()
+            ]
+            div_values = [v for v in div_values if np.isfinite(v)]
+            if div_values:
+                divergence_signal = float(np.mean(div_values))
+            else:
+                if bsp["is_buy"]:
+                    divergence_signal = -bi_macd_area - macd_hist
+                else:
+                    divergence_signal = bi_macd_area + macd_hist
+
+            # 区间套代理：要求中枢/笔结构存在，且主买卖点类型合理。
+            nested_ok = (zs_count >= 1) and (bsp["bsp_main_type"] in {"1", "2", "3"})
+            return int((divergence_signal > 0) and nested_ok)
+
+        votes = {
+            "original_return": strategy_original_return(),
+            "chan_structure_invalidation": strategy_chan_structure_invalidation(),
+            "multicycle_resonance": strategy_multicycle_resonance(),
+            "divergence_focus": strategy_divergence_focus(),
+        }
+        vote_total = int(sum(votes.values()))
+
+        if labeling_strategy == "ensemble4_consensus":
+            final_label = 1 if vote_total >= ensemble_min_votes else 0
+        else:
+            final_label = int(votes.get(labeling_strategy, votes["original_return"]))
+
         labeled = {
             "symbol": bsp["symbol"],
             "symbol_group": symbol_group,
@@ -651,10 +805,16 @@ def label_bsp_quality(
             "trade_price": bsp["trade_price"],
             "bsp_main_type": bsp["bsp_main_type"],
             "bsp_types_str": bsp["bsp_types_str"],
-            "label": 1 if change_pct >= threshold else 0,
+            "label": final_label,
             "change_pct": change_pct,
+            "favorable_pct": favorable_pct,
+            "adverse_pct": adverse_pct,
             "partner_time": partner["open_time"],
-            "holding_bars": partner["klu_idx"] - bsp["klu_idx"],
+            "holding_bars": holding_bars,
+            "labeling_strategy": labeling_strategy,
+            "labeling_name": labeling_name,
+            "vote_total": vote_total,
+            "votes": votes,
         }
         if bsp["is_buy"]:
             buy_samples.append(labeled)
@@ -668,6 +828,24 @@ def label_bsp_quality(
         "labeled_buy": len(buy_samples),
         "labeled_sell": len(sell_samples),
         "unpaired": unpaired,
+        "labeling_strategy": labeling_strategy,
+        "labeling_name": labeling_name,
+        "ensemble_min_votes": ensemble_min_votes,
+        "label_max_holding_bars": label_max_holding_bars,
+        "buy_positive": int(sum(item["label"] for item in buy_samples)),
+        "sell_positive": int(sum(item["label"] for item in sell_samples)),
+        "strategy_positive": {
+            strategy: {
+                "buy": int(sum(item["votes"].get(strategy, 0) for item in buy_samples)),
+                "sell": int(sum(item["votes"].get(strategy, 0) for item in sell_samples)),
+            }
+            for strategy in [
+                "original_return",
+                "chan_structure_invalidation",
+                "multicycle_resonance",
+                "divergence_focus",
+            ]
+        },
     }
     return buy_samples, sell_samples, stats
 
@@ -1140,6 +1318,7 @@ def train_and_evaluate(
         "classification_report": classification_report(
             y_test,
             y_pred,
+            labels=[0, 1],
             target_names=["不合格", "合格"],
             zero_division=0,
             output_dict=True,
@@ -1279,6 +1458,91 @@ def summarize_samples(name, samples: List[Dict]):
     print(f"    分区分布: {dict(part_counts)}")
 
 
+def ensure_binary_labels(
+    train_samples: List[Dict],
+    test_samples: List[Dict],
+    direction_name: str,
+) -> Tuple[List[Dict], List[Dict], Dict[str, object]]:
+    def _label_set(samples: List[Dict]) -> set:
+        return {int(item.get("label", 0)) for item in samples}
+
+    train_set = _label_set(train_samples)
+    test_set = _label_set(test_samples)
+
+    report = {
+        "train_labels_before": sorted(train_set),
+        "test_labels_before": sorted(test_set),
+        "fallback_applied": False,
+        "fallback_to": None,
+    }
+
+    if len(train_set) >= 2 and len(test_set) >= 2:
+        return train_samples, test_samples, report
+
+    # 优先回退到原始策略票（兼容策略过严导致的单类样本）。
+    for samples in (train_samples, test_samples):
+        for item in samples:
+            votes = item.get("votes", {})
+            if "original_return" in votes:
+                item["label"] = int(votes["original_return"])
+
+    train_set = _label_set(train_samples)
+    test_set = _label_set(test_samples)
+    report["fallback_applied"] = True
+    report["fallback_to"] = "original_return_vote"
+    report["train_labels_after"] = sorted(train_set)
+    report["test_labels_after"] = sorted(test_set)
+
+    print(
+        f"  [标签回退] {direction_name}: train={report['train_labels_before']}->"
+        f"{report['train_labels_after']}, test={report['test_labels_before']}->"
+        f"{report['test_labels_after']}"
+    )
+    return train_samples, test_samples, report
+
+
+def save_label_records(path: str, train_samples: List[Dict], test_samples: List[Dict]):
+    rows: List[Dict] = []
+
+    def append_rows(samples: List[Dict], dataset_split: str):
+        for item in samples:
+            votes = item.get("votes", {})
+            rows.append(
+                {
+                    "dataset_split": dataset_split,
+                    "symbol": item.get("symbol", ""),
+                    "partition": item.get("partition", ""),
+                    "open_time": item.get("open_time", ""),
+                    "is_buy": int(bool(item.get("is_buy", False))),
+                    "bsp_main_type": item.get("bsp_main_type", ""),
+                    "bsp_types_str": item.get("bsp_types_str", ""),
+                    "label": int(item.get("label", 0)),
+                    "change_pct": float(item.get("change_pct", float("nan"))),
+                    "favorable_pct": float(item.get("favorable_pct", float("nan"))),
+                    "adverse_pct": float(item.get("adverse_pct", float("nan"))),
+                    "holding_bars": int(item.get("holding_bars", 0)),
+                    "labeling_strategy": item.get("labeling_strategy", ""),
+                    "labeling_name": item.get("labeling_name", ""),
+                    "vote_total": int(item.get("vote_total", 0)),
+                    "vote_original_return": int(votes.get("original_return", 0)),
+                    "vote_chan_structure_invalidation": int(votes.get("chan_structure_invalidation", 0)),
+                    "vote_multicycle_resonance": int(votes.get("multicycle_resonance", 0)),
+                    "vote_divergence_focus": int(votes.get("divergence_focus", 0)),
+                }
+            )
+
+    append_rows(train_samples, "train")
+    append_rows(test_samples, "test")
+
+    if not rows:
+        pd.DataFrame().to_csv(path, index=False, encoding="utf-8")
+        return
+
+    pd.DataFrame(rows).sort_values(
+        ["dataset_split", "open_time", "symbol"]
+    ).to_csv(path, index=False, encoding="utf-8")
+
+
 def train_direction_pipeline(
     train_samples,
     test_samples,
@@ -1289,6 +1553,7 @@ def train_direction_pipeline(
     metrics_path,
     libsvm_path,
     filter_log_path,
+    label_records_path,
     args: TrainArgs,
     split_summary: Dict,
 ):
@@ -1305,6 +1570,15 @@ def train_direction_pipeline(
 
     summarize_samples("训练集", train_samples)
     summarize_samples("测试集", test_samples)
+
+    train_samples, test_samples, label_fallback_report = ensure_binary_labels(
+        train_samples,
+        test_samples,
+        direction_name,
+    )
+
+    save_label_records(label_records_path, train_samples, test_samples)
+    print(f"  ✓ 标注分类记录: {label_records_path}")
 
     feature_names, feature_meta = build_feature_meta(train_samples)
     X_train, y_train, _ = vectorize_samples(train_samples, feature_meta)
@@ -1364,6 +1638,7 @@ def train_direction_pipeline(
     metrics["cv_auc_scores"] = cv_aucs
     metrics["cv_auc_mean"] = float(np.mean(cv_aucs)) if cv_aucs else None
     metrics["cv_auc_std"] = float(np.std(cv_aucs)) if cv_aucs else None
+    metrics["label_fallback_report"] = label_fallback_report
     metrics["split_summary"] = split_summary
     save_json(metrics_path, metrics)
     print(f"  ✓ 指标: {metrics_path}")
@@ -1411,6 +1686,10 @@ def main():
     print(f"   训练币种({len(train_symbols)}): {', '.join(train_symbols)}")
     print(f"   保留币种({len(holdout_symbols)}): {', '.join(holdout_symbols)}")
     print(f"   训练模式: {args.train_mode}  并行进程: {args.num_workers}")
+    print(
+        f"   标注策略: {args.labeling_strategy}  名称: {args.labeling_name} "
+        f"(ensemble_min_votes={args.ensemble_min_votes}, max_hold={args.label_max_holding_bars})"
+    )
     print(f"   特征过滤模式: {args.feature_prune_mode}  topk: {args.model_prune_topk}")
     print("★" * 60)
 
@@ -1437,6 +1716,10 @@ def main():
                     args.qualified_threshold,
                     split_ts,
                     symbol in train_symbols,
+                    args.labeling_strategy,
+                    args.labeling_name,
+                    args.ensemble_min_votes,
+                    args.label_max_holding_bars,
                 )
             )
 
@@ -1465,6 +1748,19 @@ def main():
         }
         for item in sorted(collect_stats, key=lambda row: row["symbol"])
     }
+    split_summary["labeling"] = {
+        "strategy": args.labeling_strategy,
+        "name": args.labeling_name,
+        "ensemble_min_votes": args.ensemble_min_votes,
+        "label_max_holding_bars": args.label_max_holding_bars,
+        "strategies": [
+            "original_return",
+            "chan_structure_invalidation",
+            "multicycle_resonance",
+            "divergence_focus",
+        ],
+        "current_framework_integration": "original_return",
+    }
 
     buy_result = train_direction_pipeline(
         buy_train_samples,
@@ -1476,6 +1772,7 @@ def main():
         output_paths["metrics_buy"],
         output_paths["libsvm_buy"],
         output_paths["filter_buy"],
+        output_paths["label_records_buy"],
         args,
         split_summary,
     )
@@ -1489,6 +1786,7 @@ def main():
         output_paths["metrics_sell"],
         output_paths["libsvm_sell"],
         output_paths["filter_sell"],
+        output_paths["label_records_sell"],
         args,
         split_summary,
     )
