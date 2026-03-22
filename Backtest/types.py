@@ -55,6 +55,7 @@ class SymbolBacktestResult:
     signal_matrix: SignalMatrix
     equity_curve: pd.Series
     drawdown_curve: pd.Series
+    closed_trades: List[Dict[str, object]] = field(default_factory=list)
 
 
 @dataclass

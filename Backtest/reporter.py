@@ -22,7 +22,7 @@ _METRIC_META: Dict[str, Dict[str, str]] = {
     "calmar": {"label": "卡玛比率", "format": "ratio", "desc": "年化收益与最大回撤的比值"},
     "win_rate_pct": {"label": "胜率", "format": "pct", "desc": "盈利交易占总交易的比例"},
     "profit_factor": {"label": "盈亏比", "format": "ratio", "desc": "总盈利与总亏损绝对值的比值"},
-    "total_trades": {"label": "总交易次数", "format": "int", "desc": "回测期间触发并执行的交易数量"},
+    "total_trades": {"label": "闭环成交数", "format": "int", "desc": "回测期间已完成平仓的完整交易事件数量（开仓→平仓）"},
     "avg_trade_return_pct": {"label": "单笔平均收益", "format": "pct", "desc": "每笔交易平均收益率"},
     "exposure_time_pct": {"label": "持仓时间占比", "format": "pct", "desc": "处于非空仓状态的时间占比"},
     "start_cash": {"label": "初始资金", "format": "money", "desc": "回测开始时投入资金"},
@@ -86,6 +86,11 @@ _PARAM_ORDER = [
     "meta_buy_path",
     "meta_sell_path",
 ]
+
+
+# Limit heavy payload in detail HTML to avoid slow/blocked rendering on large backtests.
+_DETAIL_REPORT_MAX_PLOT_POINTS = 4000
+_DETAIL_REPORT_MAX_TRADE_EVENTS = 5000
 
 
 def _is_invalid_number(value: object) -> bool:
@@ -254,6 +259,67 @@ def _render_params_table(report_params: Optional[Dict[str, Any]]) -> str:
     )
 
 
+def _downsample_series(series: pd.Series, max_points: int) -> pd.Series:
+    if max_points <= 0 or len(series) <= max_points:
+        return series
+    step = int(math.ceil(len(series) / max_points))
+    sampled = series.iloc[::step]
+    if sampled.index[-1] != series.index[-1]:
+        sampled = pd.concat([sampled, series.iloc[[-1]]])
+    return sampled
+
+
+def _cap_trade_events(trade_events: Optional[List[ScoredSignalEvent]], max_events: int) -> tuple[Optional[List[ScoredSignalEvent]], bool]:
+    if not trade_events or max_events <= 0:
+        return trade_events, False
+    if len(trade_events) <= max_events:
+        return trade_events, False
+    # Keep newest events for readability and to reduce HTML payload.
+    return trade_events[-max_events:], True
+
+
+def _cap_table_rows(rows: Optional[List[Dict[str, Any]]], max_rows: int) -> tuple[Optional[List[Dict[str, Any]]], bool]:
+    if not rows or max_rows <= 0:
+        return rows, False
+    if len(rows) <= max_rows:
+        return rows, False
+    # Keep newest rows for interactive browsing.
+    return rows[-max_rows:], True
+
+
+def _build_executed_trade_rows(
+    per_symbol: List[SymbolBacktestResult],
+    initial_cash: float,
+    execution_mode: str,
+) -> List[Dict[str, Any]]:
+    del initial_cash, execution_mode
+    rows: List[Dict[str, Any]] = []
+
+    for item in per_symbol:
+        for trade in item.closed_trades:
+            rows.append(
+                {
+                    "symbol": str(trade.get("symbol", item.symbol)),
+                    "direction": str(trade.get("direction", "long")),
+                    "entry_time": str(trade.get("entry_time", "")),
+                    "exit_time": str(trade.get("exit_time", "")),
+                    "holding_bars": int(trade.get("holding_bars", 0)),
+                    "entry_price": trade.get("entry_price"),
+                    "exit_price": trade.get("exit_price"),
+                    "pnl": trade.get("pnl"),
+                    "return_pct": trade.get("return_pct"),
+                    "fees": trade.get("fees"),
+                    "equity_before": trade.get("equity_before"),
+                    "equity_after": trade.get("equity_after"),
+                    "equity_delta": trade.get("equity_delta"),
+                    "equity_delta_pct": trade.get("equity_delta_pct"),
+                }
+            )
+
+    rows.sort(key=lambda x: (x["entry_time"], x["symbol"]))
+    return rows
+
+
 def _normalize_trade_events(trade_events: Optional[List[ScoredSignalEvent]]) -> List[Dict[str, Any]]:
     if not trade_events:
         return []
@@ -362,8 +428,7 @@ def _risk_assessment(metrics: Dict[str, float]) -> Dict[str, str]:
     }
 
 
-def _render_trade_table(trade_events: Optional[List[ScoredSignalEvent]]) -> str:
-    trade_rows = _normalize_trade_events(trade_events)
+def _render_trade_table(trade_rows: Optional[List[Dict[str, Any]]]) -> str:
     if not trade_rows:
         return (
             "<section class='panel'>"
@@ -372,22 +437,27 @@ def _render_trade_table(trade_events: Optional[List[ScoredSignalEvent]]) -> str:
             "</section>"
         )
 
-    buy_count = sum(1 for row in trade_rows if row["direction"] == "买点")
-    sell_count = sum(1 for row in trade_rows if row["direction"] == "卖点")
-    qualified_count = sum(1 for row in trade_rows if row["qualified"] == "是")
+    symbols = sorted({str(row.get("symbol", "")) for row in trade_rows if row.get("symbol")})
 
     trades_json = json.dumps(trade_rows, ensure_ascii=False)
+    symbol_options = "".join(
+        f"<option value='{escape(sym)}'>{escape(sym)}</option>" for sym in symbols
+    )
+
     return (
         "<section class='panel'>"
         "<h2>交易明细（分页）</h2>"
-        f"<p class='hint'>总事件数：{len(trade_rows)} | 买点：{buy_count} | 卖点：{sell_count} | 达标信号：{qualified_count}</p>"
+        f"<p class='hint'>总完整交易事件：{len(trade_rows)}（开仓→平仓，按币种筛选）</p>"
         "<div class='trade-table-wrap'>"
         "<table class='data-table trade-table' id='trade-table'>"
         "<thead><tr>"
-        "<th>执行时间</th><th>标的</th><th>方向</th><th>动作</th><th>BSP类型</th>"
-        "<th>类型集合</th><th>概率</th><th>是否达标</th><th>成交价</th>"
+        "<th>开仓时间</th><th>平仓时间</th><th>标的</th><th>方向</th><th>持有Bars</th>"
+        "<th>开仓价</th><th>平仓价</th><th>PnL</th><th>收益率</th><th>手续费</th>"
+        "<th>资金(前)</th><th>资金(后)</th><th>资金变化</th><th>变化率</th>"
         "</tr></thead><tbody id='trade-table-body'></tbody></table></div>"
         "<div class='pager'>"
+        "<label for='symbol-filter'>币种</label>"
+        f"<select id='symbol-filter'><option value='ALL'>全部</option>{symbol_options}</select>"
         "<button id='page-prev' type='button'>上一页</button>"
         "<span id='page-info'>第 1 / 1 页</span>"
         "<button id='page-next' type='button'>下一页</button>"
@@ -396,6 +466,7 @@ def _render_trade_table(trade_events: Optional[List[ScoredSignalEvent]]) -> str:
         "</div></section>"
         "<script>"
         f"const tradeRows = {trades_json};"
+        "let symbolFilter = 'ALL';"
         "let currentPage = 1;"
         "let pageSize = 20;"
         "const bodyEl = document.getElementById('trade-table-body');"
@@ -403,35 +474,44 @@ def _render_trade_table(trade_events: Optional[List[ScoredSignalEvent]]) -> str:
         "const prevEl = document.getElementById('page-prev');"
         "const nextEl = document.getElementById('page-next');"
         "const sizeEl = document.getElementById('page-size');"
+        "const symbolEl = document.getElementById('symbol-filter');"
+        "function fmtNum(v, d){ if(v === null || v === undefined || Number.isNaN(Number(v))) return '--'; return Number(v).toFixed(d); }"
         "function renderTradeRows(){"
-        "const totalPages = Math.max(1, Math.ceil(tradeRows.length / pageSize));"
+        "const filtered = symbolFilter === 'ALL' ? tradeRows : tradeRows.filter(function(r){ return r.symbol === symbolFilter; });"
+        "const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));"
         "if(currentPage > totalPages){ currentPage = totalPages; }"
         "const start = (currentPage - 1) * pageSize;"
-        "const end = Math.min(start + pageSize, tradeRows.length);"
-        "const sliced = tradeRows.slice(start, end);"
+        "const end = Math.min(start + pageSize, filtered.length);"
+        "const sliced = filtered.slice(start, end);"
         "bodyEl.innerHTML = sliced.map(function(row){"
-        "const isBuy = row.direction === '买点';"
-        "const directionClass = isBuy ? 'txt-up' : 'txt-down';"
-        "const qualifiedClass = row.qualified === '是' ? 'txt-up' : 'txt-down';"
+        "const dirClass = String(row.direction).toLowerCase() === 'long' ? 'txt-up' : 'txt-down';"
+        "const pnlClass = Number(row.pnl) >= 0 ? 'txt-up' : 'txt-down';"
+        "const deltaClass = Number(row.equity_delta) >= 0 ? 'txt-up' : 'txt-down';"
         "return '<tr>'"
-        "+ '<td>' + row.exec_time + '</td>'"
+        "+ '<td>' + row.entry_time + '</td>'"
+        "+ '<td>' + row.exit_time + '</td>'"
         "+ '<td>' + row.symbol + '</td>'"
-        "+ '<td class=' + String.fromCharCode(34) + directionClass + String.fromCharCode(34) + '>' + row.direction + '</td>'"
-        "+ '<td>' + row.action + '</td>'"
-        "+ '<td>' + row.bsp_type + '</td>'"
-        "+ '<td>' + row.bsp_types_str + '</td>'"
-        "+ '<td>' + Number(row.probability).toFixed(6) + '</td>'"
-        "+ '<td class=' + String.fromCharCode(34) + qualifiedClass + String.fromCharCode(34) + '>' + row.qualified + '</td>'"
-        "+ '<td>' + Number(row.trade_price).toFixed(6) + '</td>'"
+        "+ '<td class=' + String.fromCharCode(34) + dirClass + String.fromCharCode(34) + '>' + row.direction + '</td>'"
+        "+ '<td>' + String(row.holding_bars) + '</td>'"
+        "+ '<td>' + fmtNum(row.entry_price, 6) + '</td>'"
+        "+ '<td>' + fmtNum(row.exit_price, 6) + '</td>'"
+        "+ '<td class=' + String.fromCharCode(34) + pnlClass + String.fromCharCode(34) + '>' + fmtNum(row.pnl, 2) + '</td>'"
+        "+ '<td class=' + String.fromCharCode(34) + pnlClass + String.fromCharCode(34) + '>' + fmtNum(row.return_pct, 3) + '%' + '</td>'"
+        "+ '<td>' + fmtNum(row.fees, 2) + '</td>'"
+        "+ '<td>' + fmtNum(row.equity_before, 2) + '</td>'"
+        "+ '<td>' + fmtNum(row.equity_after, 2) + '</td>'"
+        "+ '<td class=' + String.fromCharCode(34) + deltaClass + String.fromCharCode(34) + '>' + fmtNum(row.equity_delta, 2) + '</td>'"
+        "+ '<td class=' + String.fromCharCode(34) + deltaClass + String.fromCharCode(34) + '>' + fmtNum(row.equity_delta_pct, 3) + '%' + '</td>'"
         "+ '</tr>';"
         "}).join('');"
-        "infoEl.textContent = '第 ' + currentPage + ' / ' + totalPages + ' 页';"
+        "infoEl.textContent = '第 ' + currentPage + ' / ' + totalPages + ' 页（记录 ' + filtered.length + '）';"
         "prevEl.disabled = currentPage <= 1;"
         "nextEl.disabled = currentPage >= totalPages;"
         "}"
         "prevEl.addEventListener('click', function(){ if(currentPage > 1){ currentPage -= 1; renderTradeRows(); } });"
-        "nextEl.addEventListener('click', function(){ const totalPages = Math.max(1, Math.ceil(tradeRows.length / pageSize)); if(currentPage < totalPages){ currentPage += 1; renderTradeRows(); } });"
+        "nextEl.addEventListener('click', function(){ const filtered = symbolFilter === 'ALL' ? tradeRows : tradeRows.filter(function(r){ return r.symbol === symbolFilter; }); const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize)); if(currentPage < totalPages){ currentPage += 1; renderTradeRows(); } });"
         "sizeEl.addEventListener('change', function(){ pageSize = Number(sizeEl.value || 20); currentPage = 1; renderTradeRows(); });"
+        "symbolEl.addEventListener('change', function(){ symbolFilter = symbolEl.value || 'ALL'; currentPage = 1; renderTradeRows(); });"
         "renderTradeRows();"
         "</script>"
     )
@@ -510,16 +590,38 @@ def _render_html_report(
     drawdown_curve: pd.Series,
     per_symbol_metrics: Optional[List[Dict[str, object]]] = None,
     trade_events: Optional[List[ScoredSignalEvent]] = None,
+    executed_trade_rows: Optional[List[Dict[str, Any]]] = None,
     report_params: Optional[Dict[str, Any]] = None,
     include_plotly_chart: bool = True,
     include_trade_table: bool = True,
 ) -> str:
+    chart_was_downsampled = False
+    trade_events_were_capped = False
+
+    if include_plotly_chart:
+        sampled_equity = _downsample_series(equity_curve, _DETAIL_REPORT_MAX_PLOT_POINTS)
+        if len(sampled_equity) < len(equity_curve):
+            chart_was_downsampled = True
+        sampled_drawdown = drawdown_curve.reindex(sampled_equity.index).ffill().fillna(0.0)
+    else:
+        sampled_equity = equity_curve
+        sampled_drawdown = drawdown_curve
+
+    if include_trade_table:
+        trade_events, trade_events_were_capped = _cap_trade_events(
+            trade_events, _DETAIL_REPORT_MAX_TRADE_EVENTS
+        )
+        executed_trade_rows, table_rows_were_capped = _cap_table_rows(
+            executed_trade_rows, _DETAIL_REPORT_MAX_TRADE_EVENTS
+        )
+        trade_events_were_capped = trade_events_were_capped or table_rows_were_capped
+
     if include_plotly_chart:
         try:
             import plotly.graph_objects as go
             from plotly.subplots import make_subplots
 
-            period_returns = equity_curve.pct_change().fillna(0.0) * 100.0
+            period_returns = sampled_equity.pct_change().fillna(0.0) * 100.0
             period_return_colors = ["#159895" if x >= 0 else "#c44536" for x in period_returns.values]
 
             fig = make_subplots(
@@ -531,8 +633,8 @@ def _render_html_report(
             )
             fig.add_trace(
                 go.Scatter(
-                    x=equity_curve.index,
-                    y=equity_curve.values,
+                    x=sampled_equity.index,
+                    y=sampled_equity.values,
                     mode="lines",
                     name="资金曲线",
                     line={"color": "#1f6f8b", "width": 2.2},
@@ -542,8 +644,8 @@ def _render_html_report(
             )
             fig.add_trace(
                 go.Scatter(
-                    x=drawdown_curve.index,
-                    y=drawdown_curve.values * 100.0,
+                    x=sampled_drawdown.index,
+                    y=sampled_drawdown.values * 100.0,
                     mode="lines",
                     fill="tozeroy",
                     name="回撤",
@@ -616,7 +718,7 @@ def _render_html_report(
 
     symbol_table = ""
     if per_symbol_metrics:
-        header = "".join(["<th>交易标的</th>", "<th>总收益率</th>", "<th>最大回撤</th>", "<th>交易次数</th>"])
+        header = "".join(["<th>交易标的</th>", "<th>总收益率</th>", "<th>最大回撤</th>", "<th>闭环成交数</th>"])
         rows = []
         for row in per_symbol_metrics:
             row_return = row.get("total_return_pct", float("nan"))
@@ -640,7 +742,21 @@ def _render_html_report(
         )
 
     params_table = _render_params_table(report_params)
-    trade_table = _render_trade_table(trade_events) if include_trade_table else ""
+    trade_table = _render_trade_table(executed_trade_rows) if include_trade_table else ""
+
+    detail_data_hints = ""
+    if chart_was_downsampled or trade_events_were_capped:
+        hint_parts: List[str] = []
+        if chart_was_downsampled:
+            hint_parts.append(f"图表已降采样至约 {_DETAIL_REPORT_MAX_PLOT_POINTS} 点")
+        if trade_events_were_capped:
+            hint_parts.append(f"交易明细仅保留最近 {_DETAIL_REPORT_MAX_TRADE_EVENTS} 条")
+        detail_data_hints = (
+            "<section class='panel'>"
+            "<h2>性能说明</h2>"
+            f"<p class='hint'>{escape('；'.join(hint_parts))}，以提升详细报告生成与浏览速度。</p>"
+            "</section>"
+        )
 
     return (
         "<!doctype html>"
@@ -709,6 +825,7 @@ def _render_html_report(
         + "".join(metric_rows)
         + "</table></section></div>"
         + params_table
+        + detail_data_hints
         + symbol_table
         + "<section class='panel'><h2>资金与风险曲线</h2>"
         + fig_html
@@ -794,6 +911,15 @@ def write_outputs(
             report_path.write_text(summary_html, encoding="utf-8")
 
         if save_html_detail_report_flag:
+            exec_mode = "next_bar_open"
+            if report_params and isinstance(report_params.get("execution_mode"), str):
+                exec_mode = str(report_params.get("execution_mode"))
+            initial_cash = float(aggregate_metrics.get("start_cash", 0.0) or 0.0)
+            executed_trade_rows = _build_executed_trade_rows(
+                per_symbol=per_symbol,
+                initial_cash=initial_cash,
+                execution_mode=exec_mode,
+            )
             detail_html = _render_html_report(
                 report_title="Chan 策略回测报告（Detail, XGBoost + SHAP）",
                 metrics=aggregate_metrics,
@@ -801,6 +927,7 @@ def write_outputs(
                 drawdown_curve=dd,
                 per_symbol_metrics=per_symbol_metrics,
                 trade_events=all_events,
+                executed_trade_rows=executed_trade_rows,
                 report_params=report_params,
                 include_plotly_chart=True,
                 include_trade_table=True,

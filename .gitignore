@@ -10,4 +10,6 @@ gotify_push.py
 cos_config.yaml
 result/
 Debug/backup*
+Debug/runs
 data/
+backup/

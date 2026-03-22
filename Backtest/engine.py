@@ -2,7 +2,7 @@ from __future__ import annotations
 
 # flake8: noqa: E501
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -43,11 +43,14 @@ def _run_single_symbol_backtest(
     )
     validate_no_lookahead(signal_matrix, config.execution_mode)
 
-    _pf, metrics, equity_curve, drawdown_curve = run_vectorbt_for_symbol(
+    _pf, metrics, equity_curve, drawdown_curve, closed_trades = run_vectorbt_for_symbol(
         config,
         bars,
         signal_matrix,
     )
+
+    for trade in closed_trades:
+        trade["symbol"] = symbol
 
     return SymbolBacktestResult(
         symbol=symbol,
@@ -57,6 +60,7 @@ def _run_single_symbol_backtest(
         signal_matrix=signal_matrix,
         equity_curve=equity_curve,
         drawdown_curve=drawdown_curve,
+        closed_trades=closed_trades,
     )
 
 
@@ -91,7 +95,7 @@ def _aggregate_metrics(config: BacktestConfig, per_symbol: List[SymbolBacktestRe
 
     metrics["win_rate_pct"] = float(pd.Series([item.metrics.get("win_rate_pct") for item in per_symbol]).dropna().mean())
     metrics["profit_factor"] = float(pd.Series([item.metrics.get("profit_factor") for item in per_symbol]).dropna().mean())
-    metrics["total_trades"] = float(sum(float(item.metrics.get("total_trades", 0)) for item in per_symbol))
+    metrics["total_trades"] = float(sum(len(item.closed_trades) for item in per_symbol))
     metrics["avg_trade_return_pct"] = float(pd.Series([item.metrics.get("avg_trade_return_pct") for item in per_symbol]).dropna().mean())
     metrics["exposure_time_pct"] = float(pd.Series([item.metrics.get("exposure_time_pct") for item in per_symbol]).dropna().mean())
     return metrics
@@ -144,7 +148,12 @@ def run_vectorbt_backtest(
             )
     else:
         result_by_symbol: Dict[str, SymbolBacktestResult] = {}
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        executor_cls = (
+            ProcessPoolExecutor
+            if config.parallel_mode == "process"
+            else ThreadPoolExecutor
+        )
+        with executor_cls(max_workers=max_workers) as pool:
             future_map = {
                 pool.submit(
                     _run_single_symbol_backtest,

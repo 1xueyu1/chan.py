@@ -3,6 +3,7 @@ from __future__ import annotations
 # flake8: noqa: E501
 
 import argparse
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List
 
@@ -38,6 +39,9 @@ DEFAULT_CHAN_CONFIG: Dict[str, object] = {
     "zs_algo": "normal",
 }
 
+_CPU_COUNT = os.cpu_count() or 4
+_DEFAULT_SYMBOL_WORKERS = max(1, min(8, _CPU_COUNT // 2))
+
 
 @dataclass
 class BacktestConfig:
@@ -55,7 +59,9 @@ class BacktestConfig:
     allow_short: bool = False
     execution_mode: str = "next_bar_open"
     conflict_policy: str = "exit_first"
-    symbol_workers: int = 1
+    symbol_workers: int = field(default_factory=lambda: _DEFAULT_SYMBOL_WORKERS)
+    parallel_mode: str = "process"
+    fast_mode: bool = False
 
     model_buy_path: str = "Debug/model_buy.json"
     model_sell_path: str = "Debug/model_sell.json"
@@ -119,7 +125,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--allow-short", action="store_true")
     parser.add_argument("--execution-mode", default="next_bar_open", choices=["next_bar_open", "close"])
-    parser.add_argument("--symbol-workers", type=int, default=1, help="parallel workers for symbol-level backtest execution")
+    parser.add_argument(
+        "--symbol-workers",
+        type=int,
+        default=_DEFAULT_SYMBOL_WORKERS,
+        help="parallel workers for symbol-level backtest execution (auto by CPU cores)",
+    )
+    parser.add_argument(
+        "--parallel-mode",
+        choices=["process", "thread"],
+        default="process",
+        help="symbol并行模式，process通常更快（CPU密集）",
+    )
+    parser.add_argument(
+        "--fast-mode",
+        action="store_true",
+        help="快速回测模式：关闭大体积输出与HTML渲染，优先速度",
+    )
 
     parser.add_argument("--model-buy-path", default="Debug/model_buy.json")
     parser.add_argument("--model-sell-path", default="Debug/model_sell.json")
@@ -169,6 +191,8 @@ def config_from_args(args: argparse.Namespace) -> BacktestConfig:
         allow_short=bool(args.allow_short),
         execution_mode=args.execution_mode,
         symbol_workers=args.symbol_workers,
+        parallel_mode=args.parallel_mode,
+        fast_mode=bool(args.fast_mode),
         model_buy_path=args.model_buy_path,
         model_sell_path=args.model_sell_path,
         meta_buy_path=args.meta_buy_path,
@@ -177,11 +201,13 @@ def config_from_args(args: argparse.Namespace) -> BacktestConfig:
         event_replay_csv_path=args.event_replay_csv,
         replay_reapply_threshold=bool(args.replay_reapply_threshold),
         output_dir=args.output_dir,
-        save_events_csv=not args.no_events_csv,
-        save_bars_csv=not args.no_bars_csv,
+        save_events_csv=(not args.no_events_csv) and (not args.fast_mode),
+        save_bars_csv=(not args.no_bars_csv) and (not args.fast_mode),
         save_metrics_json=not args.no_metrics_json,
-        save_html_report=not args.no_html_report,
+        save_html_report=(not args.no_html_report) and (not args.fast_mode),
         save_html_detail_report=bool(args.save_html_detail_report) and (not args.no_html_report),
     )
+    if cfg.fast_mode:
+        cfg.save_html_detail_report = False
     cfg.validate()
     return cfg

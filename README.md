@@ -13,14 +13,19 @@
 
 <p><a href="https://github.com/Vespa314/chan.py/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/Vespa314/chan.py" /></a></p>
 
-- 讨论组：<a href="https://t.me/zen_python">Telegram</a>
+### Links & Documentation
+
+🎯 **快速开始**（新用户必读）：
+- [统一启动脚本快速参考卡](./QUICKSTART.md) ⭐ 从这里开始
+- [全流程产物归档与运行文档](./Debug/PIPELINE_USAGE.md) - 统一启动脚本完整说明
+
+📚 **详细文档**：
 - [快速上手指南](./quick_guide.md)
-- [全流程产物归档与运行文档](./Debug/PIPELINE_USAGE.md)
+- [全流程产物归档与运行文档](./Debug/PIPELINE_USAGE.md) - 全流程和币种分割详说
 - [版本备份规范](./backup/README.md)
 
-
-**特别说明①**：当前公开部分代码暂时只包含基本的静态计算能力，暂未包含策略类，特征，模型，automl框架，交易引擎对接等；
-
+⚙️ **核心脚本**：
+- `Debug/run_pipeline.py` - 所有操作的统一启动脚本（无需创建新脚本）
 完整代码22000行左右，公开版约5300行；本README对应的是完整版(可能在某些地方使用上和公开版本代码不一致)，尽量参考[快速上手指南](./quick_guide.md)；
 
 如有使用疑惑，欢迎讨论/邮件联系。
