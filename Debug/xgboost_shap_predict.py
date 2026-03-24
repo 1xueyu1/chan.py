@@ -164,7 +164,13 @@ def predict_with_shap(model, analyzer, last_bsp, meta, feature_names,
     # 预测
     feature_2d = feature_arr.reshape(1, -1)
     dtest = xgb.DMatrix(feature_2d, feature_names=feature_names, missing=np.nan)
-    prob = float(model.predict(dtest)[0])
+    pred = model.predict(dtest)
+    pred_arr = np.asarray(pred)
+    if pred_arr.ndim == 1:
+        prob = float(pred_arr[0])
+    else:
+        # 多分类输出时，最后一类约定为 PT(+1) 概率。
+        prob = float(pred_arr[0, -1])
 
     # SHAP 解释
     result = analyzer.analyze(feature_2d)

@@ -10,6 +10,37 @@
 
 这意味着后续功能迭代都集中在一个脚本中，不需要再创建新的启动脚本文件。
 
+说明：
+- 策略批量执行能力已并入 `Debug/run_pipeline.py`。
+- 原独立脚本 `Debug/run_labeling_strategy_full_batch.py` 已合并移除，避免策略入口分散。
+- 当前仅保留一个策略脚本：`Debug/strategy_xgb.py`（用于策略回测使用示例）。
+
+### 0.1 架构总文档（强制同步）
+
+- 模型训练与回测联动架构总文档：`Debug/MODEL_TRAINING_ARCHITECTURE.md`
+- 约束：凡是修改训练架构代码（策略、特征、标签、参数语义、回测门控）时，必须同步更新该文档。
+- 目的：保证“当前架构说明”与实际代码始终一致，避免文档过期。
+
+### 0.3 当前标签架构（已重构）
+
+- 原有买卖点双模型训练架构已下线。
+- 当前唯一训练策略为：`trainvalidator_hierarchical`。
+- 训练架构采用 Primary + Meta 两层模型。
+- 评估采用 PurgedKFold + Embargo 防泄露机制。
+- 标签仍为 Triple Barrier（PT/SL/TIMEOUT）事件标签。
+- 训练核心代码已下沉到 `ml_layer/`（`label_engine.py`、`feature_engine/engine.py`、`train_validator.py`）。
+
+### 0.2 迭代备份约定（模型研究）
+
+- 每次训练迭代都必须保留上一版完整 run 目录，不覆盖历史 run。
+- 每次训练输出都必须包含“当次架构说明快照”。
+- 当前代码已在训练流程自动生成：`MODEL_TRAINING_ARCHITECTURE_<timestamp>.md`。
+- 归档时建议保存至少以下内容：
+  - `train/`（模型、meta、metrics、filter、label records、架构快照）
+  - `logs/`
+  - `run_manifest*.json`
+- 建议每次迭代只更新“当前推荐 run_id 指针”，历史 run 只读保留。
+
 ## 概述
 
 本项目使用统一的全流程管理脚本 `run_pipeline.py`，支持三种运行方式：
@@ -124,7 +155,21 @@ Debug/
 2. 回测阶段默认按 CPU 核心数自动设置 `--symbol-workers`，并默认 `--backtest-parallel-mode process`。
 3. 当标的数量为 1 时，symbol 级并行不会带来加速，这属于预期行为。
 
+补充：
+- `ml_layer` 特征层内部也支持按 symbol 并发构建特征（`FeatureConfig.symbol_workers`）。
+- 当训练币种较多、每个币种样本量较大时，可显著缩短 L3 特征构建时间。
+
 建议仅在机器资源受限或排障时手动降低并行度。
+
+### 2.0.2 新标签与交易过滤约定
+
+1. 训练默认策略为 `trainvalidator_hierarchical`（Triple Barrier + Primary/Meta）。
+2. 标签阶段默认使用结构止损 + RR 止盈 + 时间障碍 + tw-IBS 样本权重。
+3. 回测支持两个交易过滤参数：
+  - `--signal-margin`：在基础阈值上增加边际，实际触发阈值为 `signal-threshold + signal-margin`。
+  - `--cooldown-bars`：执行交易后进入冷却窗口，冷却期内忽略新信号。
+
+这两个过滤器用于降低噪声交易密度，提升成本后的可交易性。
 
 ### 2.1 完整全流程（推荐）
 
@@ -143,6 +188,11 @@ C:/Users/xueyu/anaconda3/envs/chan/python.exe Debug/run_pipeline.py \
   --end-time 2026-02-28 \
   --train-mode auto \
   --num-workers 4 \
+  --labeling-strategy trainvalidator_hierarchical \
+  --pt-multiplier 2.0 \
+  --timeout-bars 20 \
+  --weak-timeout-bars 10 \
+  --weak-bsp-types 3 \
   --symbol-workers 2 \
   --signal-threshold 0.55 \
   --save-html-detail-report
@@ -157,6 +207,10 @@ C:/Users/xueyu/anaconda3/envs/chan/python.exe Debug/run_pipeline.py \
 4. 对 `BTCUSDT` 生成预测报告和 SHAP 解释
 5. 在全量 10 个币种上进行回测，**分别统计每个币种的收益**和聚合统计
 6. 输出完整的耗时统计（各阶段分别计时）
+
+训练产物中新增可视化报告：
+- `train/primary_shap_report.html`：Primary 模型 SHAP 报告
+- `train/meta_visual_report.html`：Meta 模型 ROC/PR/系数报告
 
 **预期耗时**：2-4 小时（全量历史数据训练，GPU 加速推荐）
 
@@ -183,6 +237,27 @@ C:/Users/xueyu/anaconda3/envs/chan/python.exe Debug/run_pipeline.py \
 4. 生成新的结果目录
 
 **预期耗时**：15-30 分钟（避免了长时间的训练）
+
+### 2.2.1 阈值自动寻优（推荐）
+
+脚本：`Debug/tune_backtest_threshold.py`
+
+用途：复用已有训练产物，按阈值网格自动跑回测并选出最优阈值。
+
+```powershell
+C:/Users/xueyu/anaconda3/envs/chan/python.exe Debug/tune_backtest_threshold.py \
+  --source-run-id labeling_suite_full_baseline_original_20260322_212132 \
+  --begin-time 2020-01-01 \
+  --end-time 2026-02-28 \
+  --symbols BTCUSDT ETHUSDT SOLUSDT \
+  --threshold-start 0.45 \
+  --threshold-stop 0.75 \
+  --threshold-step 0.02 \
+  --signal-margin 0.02 \
+  --cooldown-bars 4
+```
+
+输出：`Debug/runs/threshold_tune_<timestamp>_summary.json`
 
 ---
 
@@ -221,6 +296,22 @@ C:/Users/xueyu/anaconda3/envs/chan/python.exe Debug/run_pipeline.py \
 - `--stage train` 会自动只执行训练阶段
 - `--stage predict/backtest` 会自动走模型复用路径（需要 `--source-run-id` 或 `--train-dir`）
 
+### 2.4 批量策略运行（单脚本）
+
+通过 `Debug/run_pipeline.py` 直接批量运行多个标签策略：
+
+```powershell
+C:/Users/xueyu/anaconda3/envs/chan/python.exe Debug/run_pipeline.py \
+  --mode full \
+  --batch-labeling-strategies trainvalidator_hierarchical \
+  --batch-start-from-strategy trainvalidator_hierarchical \
+  --batch-run-prefix labeling_batch \
+  --begin-time 2020-01-01 \
+  --end-time 2026-02-28
+```
+
+输出汇总：`Debug/runs/<batch_run_prefix>_summary_<timestamp>.json`
+
 ---
 
 ## 3. 参数详解
@@ -245,6 +336,22 @@ C:/Users/xueyu/anaconda3/envs/chan/python.exe Debug/run_pipeline.py \
 | `--test-symbols` | `SOLUSDT XRPUSDT` | 用于验证的币种列表（不参与训练）|
 | `--train-mode` | `auto` | 训练设备：`cpu` / `gpu` / `auto` |
 | `--num-workers` | 自动（按CPU核数） | 数据采样的并行进程数 |
+| `--feature-symbol-workers` | 自动（约为num-workers一半） | L3特征层按symbol并发构建线程数 |
+| `--labeling-strategy` | `trainvalidator_hierarchical` | TrainValidator 分层策略 |
+| `--labeling-strategy` | `trainvalidator_hierarchical` | TrainValidator 分层训练策略 |
+| `--pt-multiplier` | `2.0` | 止盈障碍倍数（RR） |
+| `--timeout-bars` | `20` | 默认时间障碍bar数 |
+| `--weak-timeout-bars` | `10` | 弱信号时间障碍bar数 |
+| `--weak-bsp-types` | `3` | 弱信号主类型（逗号分隔） |
+| `--cv-splits` | `5` | PurgedKFold 折数 |
+| `--embargo-bars` | `10` | 时间隔离带 bar 数 |
+| `--meta-threshold` | `0.55` | Meta执行阈值 |
+| `--primary-model` | `xgboost` | Primary模型类型 |
+| `--meta-model` | `logistic` | Meta模型类型 |
+| `--optuna-trials` | `0` | 超参搜索次数（0关闭） |
+| `--mda-max-samples` | `6000` | MDA置换重要性计算最大采样数 |
+| `--mda-n-jobs` | 自动（约为num-workers一半） | MDA置换重要性并发线程数 |
+| `--shap-sample-limit` | `5000` | Primary SHAP报告最大采样数 |
 
 ### 预测参数
 
@@ -258,6 +365,8 @@ C:/Users/xueyu/anaconda3/envs/chan/python.exe Debug/run_pipeline.py \
 |------|--------|------|
 | `--backtest-symbols` | 全 10 个币种 | 回测的币种列表 |
 | `--symbol-workers` | 自动（按CPU核数） | 回测时币种级并行 worker 数 |
+| `--signal-margin` | `0.0` | 信号边际，抬高触发阈值 |
+| `--cooldown-bars` | `0` | 执行后冷却 bar 数 |
 | `--save-html-detail-report` | False | 是否生成详细 HTML 报告 |
 
 ### 复用参数（仅在 `mode=predict-backtest` 时使用）

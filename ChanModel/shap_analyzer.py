@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import base64
 import io
-import json
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union
@@ -134,13 +133,33 @@ class SHAPAnalyzer:
         self.explainer = shap.TreeExplainer(self.model)
         shap_values = self.explainer.shap_values(dmat)
 
-        # shap_values 可能是 list（多分类）或 ndarray（二分类）
+        # shap_values 可能是 list（多分类）或 ndarray（二分类/多分类）
         if isinstance(shap_values, list):
-            shap_values = shap_values[1]  # 取正类
+            # 多分类 list：默认取最后一类（训练脚本中约定为 PT(+1)）
+            shap_values = shap_values[-1]
 
-        base_value = float(self.explainer.expected_value)
-        if isinstance(self.explainer.expected_value, (list, np.ndarray)):
-            base_value = float(self.explainer.expected_value[0])
+        shap_values = np.array(shap_values)
+        if shap_values.ndim == 3:
+            n_feat = len(self.feature_names)
+            # 常见布局1: (n_samples, n_features, n_classes)
+            if shap_values.shape[1] == n_feat:
+                shap_values = shap_values[:, :, -1]
+            # 常见布局2: (n_classes, n_samples, n_features)
+            elif shap_values.shape[2] == n_feat and shap_values.shape[0] <= 10:
+                shap_values = shap_values[-1, :, :]
+            # 常见布局3: (n_samples, n_classes, n_features)
+            elif shap_values.shape[2] == n_feat and shap_values.shape[1] <= 10:
+                shap_values = shap_values[:, -1, :]
+            else:
+                raise ValueError(
+                    f"Unsupported SHAP 3D shape: {shap_values.shape}"
+                )
+
+        expected_value = self.explainer.expected_value
+        if isinstance(expected_value, (list, np.ndarray)):
+            base_value = float(expected_value[-1])
+        else:
+            base_value = float(expected_value)
 
         result = SHAPResult(
             shap_values=np.array(shap_values),
@@ -385,26 +404,29 @@ class SHAPAnalyzer:
         # 1. 模型概览
         html_parts.append(self._section_model_overview(result, model_metrics))
 
-        # 2. 全局特征重要性 (Plotly 交互)
+        # 2. 模型作用与训练结果分析
+        html_parts.append(self._section_model_role_and_analysis(model_metrics))
+
+        # 3. 全局特征重要性 (Plotly 交互)
         html_parts.append(self._section_global_importance(result))
 
-        # 3. SHAP Summary (matplotlib)
+        # 4. SHAP Summary (matplotlib)
         html_parts.append(self._section_summary_plots(result))
 
-        # 4. Top-N Dependence Plots (Plotly)
+        # 5. Top-N Dependence Plots (Plotly)
         html_parts.append(self._section_dependence_plots(result, top_dependence))
 
-        # 5. SHAP 热力图 (Plotly)
+        # 6. SHAP 热力图 (Plotly)
         html_parts.append(self._section_heatmap(result))
 
-        # 6. 单样本解释 (Waterfall + Force)
+        # 7. 单样本解释 (Waterfall + Force)
         if sample_indices is None:
             # 选择预测最高 / 最低 / 中间各一个
             probs = self._predict_probs(result)
             sample_indices = self._auto_select_samples(probs)
         html_parts.append(self._section_sample_explanations(result, sample_indices))
 
-        # 7. 特征重要性表格
+        # 8. 特征重要性表格
         html_parts.append(self._section_importance_table(result))
 
         html_parts.append(self._report_footer())
@@ -525,18 +547,104 @@ class SHAPAnalyzer:
         <div class="metric-card"><div class="value">{n_features}</div><div class="label">特征数量</div></div>
         '''
 
+        metric_name_map = {
+            "oos_sharpe": "样本外夏普比率（OOS Sharpe）",
+            "oos_precision": "样本外精确率（OOS Precision）",
+            "oos_macro_f1": "样本外宏平均F1（OOS Macro-F1）",
+            "primary_auc_ovr_macro": "主模型AUC（OVR宏平均）",
+            "primary_logloss": "主模型对数损失（LogLoss）",
+            "primary_signal_coverage": "信号覆盖率（Signal Coverage）",
+            "primary_signal_precision": "信号精确率（Signal Precision）",
+            "label_pt_ratio": "标签PT占比（Label PT Ratio）",
+            "label_timeout_ratio": "标签Timeout占比（Label Timeout Ratio）",
+            "label_sl_ratio": "标签SL占比（Label SL Ratio）",
+        }
+
         if metrics:
             for name, val in metrics.items():
+                label = metric_name_map.get(name, name)
                 if isinstance(val, float):
-                    cards += f'<div class="metric-card"><div class="value">{val:.4f}</div><div class="label">{name}</div></div>'
+                    cards += f'<div class="metric-card"><div class="value">{val:.4f}</div><div class="label">{label}</div></div>'
                 else:
-                    cards += f'<div class="metric-card"><div class="value">{val}</div><div class="label">{name}</div></div>'
+                    cards += f'<div class="metric-card"><div class="value">{val}</div><div class="label">{label}</div></div>'
 
         return f'''
     <div class="section">
         <h2>1. 模型概览</h2>
         <p>标签分布: {label_info}</p>
         <div class="metrics-grid">{cards}</div>
+    </div>'''
+
+    def _section_model_role_and_analysis(self, metrics: Optional[Dict]) -> str:
+        metrics = metrics or {}
+
+        signal_coverage = float(metrics.get("primary_signal_coverage", 0.0) or 0.0)
+        signal_precision = float(metrics.get("primary_signal_precision", 0.0) or 0.0)
+        oos_precision = float(metrics.get("oos_precision", 0.0) or 0.0)
+        oos_macro_f1 = float(metrics.get("oos_macro_f1", 0.0) or 0.0)
+        oos_sharpe = float(metrics.get("oos_sharpe", 0.0) or 0.0)
+        auc_macro = float(metrics.get("primary_auc_ovr_macro", 0.0) or 0.0)
+        logloss = float(metrics.get("primary_logloss", 0.0) or 0.0)
+
+        if oos_sharpe > 0:
+            sharpe_comment = "风险调整后收益为正，模型在当前样本区间具备可交易性。"
+        elif oos_sharpe > -0.5:
+            sharpe_comment = "风险收益接近盈亏平衡，建议结合阈值与交易成本进一步调优。"
+        else:
+            sharpe_comment = "风险调整后收益偏弱，建议优先优化标签定义、阈值与过滤逻辑。"
+
+        if auc_macro >= 0.70:
+            auc_comment = "AUC 辨别能力较好，类别区分有效。"
+        elif auc_macro >= 0.60:
+            auc_comment = "AUC 处于中等水平，可通过特征工程进一步提升。"
+        else:
+            auc_comment = "AUC 偏低，模型区分能力有限，建议检查样本与标签质量。"
+
+        if signal_precision >= 0.70:
+            precision_comment = "信号质量较高，误报相对可控。"
+        elif signal_precision >= 0.55:
+            precision_comment = "信号质量中等，需继续配合阈值优化。"
+        else:
+            precision_comment = "信号误报偏多，建议优化特征与阈值。"
+
+        if signal_coverage >= 0.40:
+            coverage_comment = "覆盖率较高，交易机会更充足。"
+        elif signal_coverage >= 0.20:
+            coverage_comment = "覆盖率中等，交易频率与质量较平衡。"
+        else:
+            coverage_comment = "覆盖率偏低，可能错失部分机会。"
+
+        if logloss <= 0.60:
+            logloss_comment = "概率输出质量较好。"
+        elif logloss <= 0.80:
+            logloss_comment = "概率输出中等，可继续优化校准。"
+        else:
+            logloss_comment = "概率输出偏弱，建议检查样本分布与模型稳定性。"
+
+        return f'''
+    <div class="section">
+        <h2>2. 模型定位与训练结果分析</h2>
+        <p><strong>框架定位：</strong>Primary 模型是第一层方向模型，负责把样本划分为 SL / TIMEOUT / PT 三类，输出后续 Meta 过滤所需的先验概率。它决定了策略的“候选信号池质量”和覆盖率上限。</p>
+        <p><strong>本次结果解读：</strong></p>
+        <ul style="padding-left:18px; margin:10px 0;">
+            <li>样本外精确率={oos_precision:.4f}，样本外宏平均F1={oos_macro_f1:.4f}，反映分类稳定性与有效信号命中率。</li>
+            <li>信号覆盖率={signal_coverage:.4f}（{coverage_comment}），信号精确率={signal_precision:.4f}（{precision_comment}）。</li>
+            <li>主模型AUC（OVR宏平均）={auc_macro:.4f}，主模型LogLoss={logloss:.4f}。{auc_comment} {logloss_comment}</li>
+            <li>样本外夏普比率={oos_sharpe:.4f}。{sharpe_comment}</li>
+        </ul>
+
+        <h3>指标释义（Primary层）</h3>
+        <ul style="padding-left:18px; margin:10px 0;">
+            <li><strong>样本外精确率（OOS Precision）：</strong>在未见样本中，模型给出的有效信号有多少是真有效，直接影响实盘信号可信度。</li>
+            <li><strong>样本外宏平均F1（OOS Macro-F1）：</strong>综合精确率与召回率，并对各类更均衡，适合评估多分类稳定性。</li>
+            <li><strong>信号覆盖率（Signal Coverage）：</strong>模型最终给出交易信号的比例，决定策略交易频率。</li>
+            <li><strong>信号精确率（Signal Precision）：</strong>被触发信号中的真实有效比例，决定“每笔交易质量”。</li>
+            <li><strong>AUC（OVR宏平均）：</strong>模型区分不同类别的能力，越高说明排序和识别能力越强。</li>
+            <li><strong>LogLoss：</strong>概率预测误差，越低越好；对“高置信但错误”惩罚更强。</li>
+            <li><strong>样本外夏普比率（OOS Sharpe）：</strong>风险调整后的收益表现，是交易策略可用性的核心指标。</li>
+        </ul>
+
+        <p><strong>优化建议：</strong>若追求更稳健收益，优先联动优化三项：1) 标签质量（PT/SL/Timeout 配置）；2) Meta 阈值；3) 特征子集（基于 MDI+MDA+SHAP 交集）。</p>
     </div>'''
 
     def _section_global_importance(self, result: SHAPResult) -> str:
@@ -547,7 +655,7 @@ class SHAPAnalyzer:
         )
         return f'''
     <div class="section">
-        <h2>2. 全局特征重要性 (交互式)</h2>
+        <h2>3. 全局特征重要性 (交互式)</h2>
         <p>基于 Mean |SHAP value| 的全局特征重要性排名，反映每个特征对模型预测的平均贡献。</p>
         <div class="plot-container">{plotly_html}</div>
     </div>'''
@@ -558,7 +666,7 @@ class SHAPAnalyzer:
         dot_b64 = self.plot_summary_dot(result)
         return f'''
     <div class="section">
-        <h2>3. SHAP Summary 图</h2>
+        <h2>4. SHAP Summary 图</h2>
         <div class="two-col">
             <div>
                 <h3>特征重要性柱状图</h3>
@@ -592,7 +700,7 @@ class SHAPAnalyzer:
 
         return f'''
     <div class="section">
-        <h2>4. SHAP Dependence Plots (Top-{top_n} 特征)</h2>
+        <h2>5. SHAP Dependence Plots (Top-{top_n} 特征)</h2>
         <p>展示特征值与其 SHAP 贡献的关系，揭示模型如何利用每个特征做预测。</p>
         {plots_html}
     </div>'''
@@ -605,7 +713,7 @@ class SHAPAnalyzer:
         )
         return f'''
     <div class="section">
-        <h2>5. SHAP 值热力图</h2>
+        <h2>6. SHAP 值热力图</h2>
         <p>每行代表一个样本，每列代表一个特征。颜色越红/蓝，SHAP 贡献越正/负。</p>
         <div class="plot-container">{plotly_html}</div>
     </div>'''
@@ -614,7 +722,6 @@ class SHAPAnalyzer:
         self, result: SHAPResult, sample_indices: List[int],
     ) -> str:
         """单样本解释 (Waterfall + Force + 文字)"""
-        probs = self._predict_probs(result)
         cards = ""
 
         for i, idx in enumerate(sample_indices):
@@ -671,7 +778,7 @@ class SHAPAnalyzer:
 
         return f'''
     <div class="section">
-        <h2>6. 单样本决策解释</h2>
+        <h2>7. 单样本决策解释</h2>
         <p>选取代表性样本（最高置信 / 最低置信 / 中间），展示模型的决策过程。</p>
         {cards}
     </div>'''
@@ -688,7 +795,7 @@ class SHAPAnalyzer:
 
         return f'''
     <div class="section">
-        <h2>7. 特征重要性完整排名</h2>
+        <h2>8. 特征重要性完整排名</h2>
         <table class="feat-table">
             <tr><th>#</th><th>特征名称</th><th>Mean |SHAP|</th></tr>
             {rows}
