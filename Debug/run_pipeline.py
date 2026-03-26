@@ -29,6 +29,7 @@ except ImportError:
 _CPU_COUNT = os.cpu_count() or 4
 _DEFAULT_NUM_WORKERS = max(1, _CPU_COUNT - 1)
 _DEFAULT_SYMBOL_WORKERS = max(1, min(8, _CPU_COUNT // 2))
+_DEFAULT_FEATURE_SYMBOL_WORKERS = max(1, min(8, _DEFAULT_NUM_WORKERS // 2))
 _MAX_TRAIN_TIME_SEC = 4 * 3600  # 4小时超时
 _MAX_BACKTEST_TIME_SEC = 3 * 3600  # 3小时超时
 _MIN_AVAILABLE_MEMORY_GB = 2.0  # 最少保留2GB内存  
@@ -131,6 +132,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="训练阶段并行采样进程数（默认按CPU自动设置）",
     )
     parser.add_argument(
+        "--feature-symbol-workers",
+        type=int,
+        default=_DEFAULT_FEATURE_SYMBOL_WORKERS,
+        help="训练阶段特征构建并行symbol数（默认按CPU自动设置）",
+    )
+    parser.add_argument(
         "--labeling-strategy",
         choices=["trainvalidator_hierarchical"],
         default="trainvalidator_hierarchical",
@@ -169,13 +176,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--timeout-bars",
         type=int,
         default=20,
-        help="三重障碍默认时间障碍bar数",
+        help="已弃用（为兼容保留）：二分类标签模式下不参与标注",
     )
     parser.add_argument(
         "--weak-timeout-bars",
         type=int,
         default=10,
-        help="弱信号时间障碍bar数（例如三类买卖点）",
+        help="已弃用（为兼容保留）：二分类标签模式下不参与标注",
     )
     parser.add_argument(
         "--weak-bsp-types",
@@ -475,6 +482,8 @@ def _run_full_pipeline(args: argparse.Namespace) -> None:
         args.train_mode,
         "--num-workers",
         str(args.num_workers),
+        "--feature-symbol-workers",
+        str(args.feature_symbol_workers),
         "--labeling-strategy",
         args.labeling_strategy,
         "--labeling-name",
@@ -679,6 +688,7 @@ def _run_full_pipeline(args: argparse.Namespace) -> None:
             },
             "train_mode": args.train_mode,
             "num_workers": args.num_workers,
+            "feature_symbol_workers": args.feature_symbol_workers,
             "labeling_strategy": args.labeling_strategy,
             "labeling_name": args.labeling_name,
             "pt_multiplier": args.pt_multiplier,

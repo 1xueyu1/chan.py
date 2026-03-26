@@ -37,7 +37,7 @@ def compute_mdi_mda(
     base_prob = primary_booster.predict(xgb.DMatrix(X_eval, missing=np.nan))
     base_prob = np.asarray(base_prob)
     if base_prob.ndim == 1:
-        base_prob = np.stack([1.0 - base_prob, np.zeros_like(base_prob), base_prob], axis=1)
+        base_prob = np.stack([1.0 - base_prob, base_prob], axis=1)
     base_pred = np.argmax(base_prob, axis=1)
     base_score = f1_score(y_eval, base_pred, average="macro", zero_division=0)
 
@@ -51,7 +51,7 @@ def compute_mdi_mda(
         p = primary_booster.predict(xgb.DMatrix(X_perm, missing=np.nan))
         p = np.asarray(p)
         if p.ndim == 1:
-            p = np.stack([1.0 - p, np.zeros_like(p), p], axis=1)
+            p = np.stack([1.0 - p, p], axis=1)
         pred = np.argmax(p, axis=1)
         score = f1_score(y_eval, pred, average="macro", zero_division=0)
         return {"feature": name, "mda_drop": float(base_score - score)}

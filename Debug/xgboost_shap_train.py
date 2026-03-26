@@ -326,8 +326,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--labeling-strategy", default="trainvalidator_hierarchical")
     parser.add_argument("--labeling-name", default="TrainValidator_v2")
     parser.add_argument("--pt-multiplier", type=float, default=2.0)
-    parser.add_argument("--timeout-bars", type=int, default=20)
-    parser.add_argument("--weak-timeout-bars", type=int, default=10)
+    parser.add_argument("--timeout-bars", type=int, default=20, help="deprecated: ignored in binary PT/SL labeling")
+    parser.add_argument("--weak-timeout-bars", type=int, default=10, help="deprecated: ignored in binary PT/SL labeling")
     parser.add_argument("--weak-bsp-types", default="3")
 
     parser.add_argument("--cv-splits", type=int, default=5)
@@ -468,7 +468,7 @@ def main():
     print(f" 数据源={DATA_SRC_TYPE.name}, 周期={ns.kl_type}")
     print(f" 区间={ns.begin_time} ~ {ns.end_time}")
     print(f" 标注策略={ns.labeling_strategy}, 名称={ns.labeling_name}")
-    print(f" 三重障碍: pt={label_config.pt_multiplier}, timeout={label_config.timeout_bars}, weak_timeout={label_config.weak_timeout_bars}, weak_types={label_config.weak_bsp_types}")
+    print(f" 二分类标注: pt={label_config.pt_multiplier}, labels={{SL(-1), PT(+1)}}")
     print(f" 验证: folds={validator_config.n_splits}, embargo={validator_config.embargo_bars}")
     print("★" * 60)
 
@@ -533,22 +533,20 @@ def main():
 
     p_all = trainer.primary_model.predict_proba(X)
     c_all = np.argmax(p_all, axis=1)
-    sig_all = c_all != 1
+    sig_all = np.ones(len(c_all), dtype=bool)
 
     # 组织可视化指标：补充 AUC/LogLoss/覆盖率等。
     label_total = max(1, int(len(y)))
-    label_pt_ratio = float(np.sum(y == 2) / label_total)
-    label_timeout_ratio = float(np.sum(y == 1) / label_total)
+    label_pt_ratio = float(np.sum(y == 1) / label_total)
     label_sl_ratio = float(np.sum(y == 0) / label_total)
 
     primary_auc_ovr_macro = 0.0
     primary_logloss = 0.0
     try:
         if len(np.unique(y)) >= 2:
-            primary_auc_ovr_macro = float(
-                roc_auc_score(y, p_all, multi_class="ovr", average="macro")
-            )
-            primary_logloss = float(log_loss(y, np.clip(p_all, 1e-8, 1.0), labels=[0, 1, 2]))
+            p_pos = p_all[:, -1] if p_all.ndim == 2 else p_all
+            primary_auc_ovr_macro = float(roc_auc_score(y, p_pos))
+            primary_logloss = float(log_loss(y, np.clip(p_pos, 1e-8, 1.0), labels=[0, 1]))
     except Exception:
         pass
 
@@ -565,14 +563,13 @@ def main():
         "primary_signal_coverage": float(np.mean(sig_all.astype(float))),
         "primary_signal_precision": float(primary_signal_precision),
         "label_pt_ratio": label_pt_ratio,
-        "label_timeout_ratio": label_timeout_ratio,
         "label_sl_ratio": label_sl_ratio,
     }
 
     # Primary模型（XGBoost）可视化。
     try:
         shap_analyzer = SHAPAnalyzer(trainer.primary_model.booster, feature_names)
-        shap_X, shap_y = sample_for_shap(X, (y == 2).astype(int), max(500, int(ns.shap_sample_limit)))
+        shap_X, shap_y = sample_for_shap(X, (y == 1).astype(int), max(500, int(ns.shap_sample_limit)))
         shap_result = shap_analyzer.analyze(shap_X, y=shap_y)
         shap_report_path = Path(output_dir) / "primary_shap_report.html"
         shap_analyzer.generate_report(
@@ -589,7 +586,8 @@ def main():
         if np.any(sig_all):
             meta_X = np.hstack([np.nan_to_num(X[sig_all], nan=0.0), p_all[sig_all]])
             meta_y = (c_all[sig_all] == y[sig_all]).astype(int)
-            meta_feature_names = feature_names + ["p_sl", "p_timeout", "p_pt"]
+            meta_prob_cols = [f"p_cls_{i}" for i in range(p_all.shape[1])] if p_all.ndim == 2 else ["p_cls_1"]
+            meta_feature_names = feature_names + meta_prob_cols
             meta_report_path = Path(output_dir) / "meta_visual_report.html"
             generate_meta_model_visual_report(
                 output_path=str(meta_report_path),

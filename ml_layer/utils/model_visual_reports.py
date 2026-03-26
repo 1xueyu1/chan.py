@@ -324,7 +324,7 @@ th{{background:#f3f6fb;}}
 <div class=\"card h1\"><h2>Meta 模型可视化分析</h2><p>二层执行过滤模型：控制信号通过率，平衡精度与覆盖率</p></div>
 
 <div class=\"card\"><h3>模型定位与框架作用</h3>
-<p>在 L3+L4 框架中，Primary 模型负责方向预测（SL/TIMEOUT/PT），Meta 模型负责执行过滤（是否放行）。Meta 直接影响实盘交易频次、胜率与回撤风险，是策略稳健性闸门。</p>
+<p>在 L3+L4 框架中，Primary 模型负责方向预测（SL/PT），Meta 模型负责执行过滤（是否放行）。Meta 直接影响实盘交易频次、胜率与回撤风险，是策略稳健性闸门。</p>
 </div>
 
 <div class=\"card\"><h3>核心指标</h3><div class=\"metrics\">{summary_cards}</div></div>

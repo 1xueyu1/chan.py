@@ -53,7 +53,7 @@ class PrimaryModel:
         p = self.model.predict(xgb.DMatrix(X, missing=np.nan))
         arr = np.asarray(p)
         if arr.ndim == 1:
-            arr = np.stack([1.0 - arr, np.zeros_like(arr), arr], axis=1)
+            arr = np.stack([1.0 - arr, arr], axis=1)
         return arr
 
     def predict_class(self, X):

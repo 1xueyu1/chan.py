@@ -22,7 +22,8 @@ class LabelEngine:
 
     @staticmethod
     def _label_to_class(label_raw: int) -> int:
-        return int(label_raw + 1)
+        # Binary class map: SL(-1)->0, PT(+1)->1
+        return 1 if int(label_raw) > 0 else 0
 
     def _compute_structural_sl(self, event: Dict) -> float:
         entry = float(event["trade_price"])
@@ -65,8 +66,7 @@ class LabelEngine:
             e = int(item["t1_pos"])
             overlap_avg = float((prefix[e] - (prefix[s - 1] if s > 0 else 0.0)) / max(1, e - s + 1))
             overlap_avg = max(1.0, overlap_avg)
-            timeout_used = max(1, int(item.get("timeout_used", 1)))
-            holding_norm = max(0.05, min(1.0, float(item["holding_bars"]) / float(timeout_used)))
+            holding_norm = 1.0
             raw_w = holding_norm / overlap_avg
             item["overlap_count"] = overlap_avg
             item["holding_time_normalized"] = holding_norm
@@ -82,7 +82,6 @@ class LabelEngine:
         if not events or not bars:
             return []
 
-        weak_types = {x.strip() for x in str(self.config.weak_bsp_types).split(",") if x.strip()}
         idx2pos = {int(b["klu_idx"]): i for i, b in enumerate(bars)}
         highs = np.asarray([float(b["high"]) for b in bars], dtype=np.float64)
         lows = np.asarray([float(b["low"]) for b in bars], dtype=np.float64)
@@ -99,9 +98,6 @@ class LabelEngine:
             if t0_pos is None:
                 continue
 
-            timeout_used = self.config.weak_timeout_bars if event["bsp_main_type"] in weak_types else self.config.timeout_bars
-            timeout_used = max(1, int(timeout_used))
-
             sl = self._compute_structural_sl(event)
             risk = abs(entry - sl)
             if risk <= 1e-8:
@@ -109,10 +105,10 @@ class LabelEngine:
                 sl = entry - risk if bool(event["is_buy"]) else entry + risk
 
             pt = entry + risk * self.config.pt_multiplier if bool(event["is_buy"]) else entry - risk * self.config.pt_multiplier
-            end_pos = min(len(bars) - 1, t0_pos + timeout_used)
+            end_pos = len(bars) - 1
 
-            label_raw = 0
-            hit_event = "timeout"
+            label_raw = -1
+            hit_event = "end_of_data"
             t1_pos = end_pos
 
             for pos in range(t0_pos + 1, end_pos + 1):
@@ -147,21 +143,26 @@ class LabelEngine:
             else:
                 realized_ret = (entry - exit_price) / (entry + 1e-9)
 
-            if abs(realized_ret) < float(self.config.min_ret_threshold) and label_raw != 0:
-                label_raw = 0
-                hit_event = "ret_floor_timeout"
+            # No timeout class: if PT/SL not triggered until data end, use realized sign.
+            if hit_event == "end_of_data":
+                if abs(realized_ret) < float(self.config.min_ret_threshold):
+                    label_raw = -1
+                    hit_event = "ret_floor_sl"
+                else:
+                    label_raw = 1 if realized_ret > 0 else -1
+                    hit_event = "ret_sign_pt" if label_raw > 0 else "ret_sign_sl"
 
             labeled.append(
                 {
                     **event,
                     "label_raw": int(label_raw),
                     "label": self._label_to_class(int(label_raw)),
-                    "label_text": "PT" if label_raw == 1 else ("SL" if label_raw == -1 else "TIMEOUT"),
+                    "label_text": "PT" if label_raw == 1 else "SL",
                     "entry_price": float(entry),
                     "sl_price": float(sl),
                     "pt_price": float(pt),
                     "hit_event": hit_event,
-                    "timeout_used": int(timeout_used),
+                    "timeout_used": 0,
                     "t0_pos": int(t0_pos),
                     "t1_pos": int(t1_pos),
                     "t0_ts": float(event["open_ts"]),

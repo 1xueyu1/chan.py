@@ -37,7 +37,7 @@ class InferenceEngine:
 
         p_primary = self.primary.predict_proba(X)[0]
         primary_class = int(np.argmax(p_primary))
-        primary_direction = -1 if primary_class == 0 else (1 if primary_class == 2 else 0)
+        primary_direction = -1 if primary_class == 0 else 1
 
         p_meta = 1.0
         if primary_direction != 0:
@@ -45,11 +45,13 @@ class InferenceEngine:
             p_meta = float(self.meta.predict_proba(meta_input)[0])
 
         final_direction = primary_direction if p_meta >= self.meta_threshold else 0
+        p_short = float(p_primary[0])
+        p_long = float(p_primary[-1])
         return SignalOutput(
             ts=ts,
             direction=final_direction,
             confidence=float(p_meta),
-            primary_proba={"short": float(p_primary[0]), "flat": float(p_primary[1]), "long": float(p_primary[2])},
+            primary_proba={"short": p_short, "long": p_long},
             meta_proba=float(p_meta),
             bsp_type=bsp_type,
             sl_price=float(sl_price),

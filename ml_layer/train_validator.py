@@ -37,11 +37,8 @@ class TrainValidator:
 
     @staticmethod
     def _signal_from_class(classes: np.ndarray) -> np.ndarray:
-        # class map: 0=SL(-1), 1=TIMEOUT(0), 2=PT(+1)
-        signal = np.zeros_like(classes, dtype=np.int32)
-        signal[classes == 0] = -1
-        signal[classes == 2] = 1
-        return signal
+        # Binary class map: 0=SL(-1), 1=PT(+1)
+        return np.where(classes == 1, 1, -1).astype(np.int32)
 
     @staticmethod
     def _build_meta_features(X: np.ndarray, p_primary: np.ndarray) -> np.ndarray:
@@ -57,7 +54,7 @@ class TrainValidator:
         y_test: np.ndarray,
         test_rets: np.ndarray,
         train_mode: str,
-    ) -> Tuple[np.ndarray, np.ndarray, FoldMetrics]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, FoldMetrics]:
         primary = PrimaryModel(
             params=self.model_config.xgb_params,
             num_rounds=self.model_config.xgb_num_rounds,
@@ -66,48 +63,39 @@ class TrainValidator:
 
         p_train = primary.predict_proba(X_train)
         c_train = np.argmax(p_train, axis=1)
-        train_signal_mask = c_train != 1
 
         meta = MetaModel()
-        if train_signal_mask.sum() > 0:
-            meta_y = (c_train[train_signal_mask] == y_train[train_signal_mask]).astype(int)
-            meta_X = self._build_meta_features(X_train[train_signal_mask], p_train[train_signal_mask])
-            meta.fit(meta_X, meta_y)
+        meta_y = (c_train == y_train).astype(int)
+        meta_X = self._build_meta_features(X_train, p_train)
+        meta.fit(meta_X, meta_y)
 
         p_test = primary.predict_proba(X_test)
         c_test = np.argmax(p_test, axis=1)
-        signal_mask = c_test != 1
-
-        final_class = np.full(len(y_test), 1, dtype=np.int32)
+        keep_mask = np.zeros(len(y_test), dtype=bool)
         exec_prob = np.zeros(len(y_test), dtype=np.float32)
 
-        if signal_mask.any():
-            meta_test_X = self._build_meta_features(X_test[signal_mask], p_test[signal_mask])
+        if len(y_test) > 0:
+            meta_test_X = self._build_meta_features(X_test, p_test)
             p_exec = meta.predict_proba(meta_test_X)
-            kept = p_exec >= self.model_config.meta_threshold
-            tmp = np.full(signal_mask.sum(), 1, dtype=np.int32)
-            tmp[kept] = c_test[signal_mask][kept]
-            final_class[signal_mask] = tmp
-            exec_prob[signal_mask] = p_exec
+            keep_mask = p_exec >= self.model_config.meta_threshold
+            exec_prob = p_exec.astype(np.float32)
 
-        sig = self._signal_from_class(final_class)
-        sig_mask = sig != 0
-        precision = float(np.mean((final_class[sig_mask] == y_test[sig_mask]).astype(float))) if sig_mask.any() else 0.0
-        recall = float(np.sum((final_class[sig_mask] == y_test[sig_mask]).astype(float)) / max(1, np.sum(y_test != 1)))
-        macro_f1 = float(f1_score(y_test, final_class, average="macro", zero_division=0))
-        sharpe = annualized_sharpe(test_rets[sig_mask]) if sig_mask.any() else 0.0
+        precision = float(np.mean((c_test[keep_mask] == y_test[keep_mask]).astype(float))) if keep_mask.any() else 0.0
+        recall = float(np.sum((c_test[keep_mask] == y_test[keep_mask]).astype(float)) / max(1, len(y_test)))
+        macro_f1 = float(f1_score(y_test, c_test, average="macro", zero_division=0))
+        sharpe = annualized_sharpe(test_rets[keep_mask]) if keep_mask.any() else 0.0
 
         metrics = FoldMetrics(
             fold=0,
             train_size=int(len(y_train)),
             test_size=int(len(y_test)),
-            signal_count=int(sig_mask.sum()),
+            signal_count=int(keep_mask.sum()),
             precision=precision,
             recall=recall,
             macro_f1=macro_f1,
             sharpe=sharpe,
         )
-        return final_class, exec_prob, metrics
+        return c_test, exec_prob, keep_mask, metrics
 
     def fit(
         self,
@@ -125,15 +113,16 @@ class TrainValidator:
             embargo_bars=self.validator_config.embargo_bars,
         )
 
-        oos_cls = np.full(len(y), 1, dtype=np.int32)
+        oos_cls = np.zeros(len(y), dtype=np.int32)
         oos_exec = np.zeros(len(y), dtype=np.float32)
+        oos_keep = np.zeros(len(y), dtype=bool)
         folds: List[FoldMetrics] = []
 
         for fold_id, (train_idx, test_idx) in enumerate(splitter.split(t0_pos=t0_pos, t1_pos=t1_pos), start=1):
             if len(np.unique(y[train_idx])) < 2 or len(np.unique(y[test_idx])) < 2:
                 continue
 
-            cls, exec_prob, fold_metric = self._fit_one_fold(
+            cls, exec_prob, keep_mask, fold_metric = self._fit_one_fold(
                 X_train=X[train_idx],
                 y_train=y[train_idx],
                 w_train=sample_weight[train_idx],
@@ -146,6 +135,7 @@ class TrainValidator:
             folds.append(fold_metric)
             oos_cls[test_idx] = cls
             oos_exec[test_idx] = exec_prob
+            oos_keep[test_idx] = keep_mask
 
         if not folds:
             raise RuntimeError("PurgedKFold 未生成有效折，请扩大样本或降低切分数")
@@ -159,13 +149,11 @@ class TrainValidator:
 
         p_all = self.primary_model.predict_proba(X)
         c_all = np.argmax(p_all, axis=1)
-        sig_all = c_all != 1
 
         self.meta_model = MetaModel()
-        if sig_all.sum() > 0:
-            meta_y = (c_all[sig_all] == y[sig_all]).astype(int)
-            meta_X = self._build_meta_features(X[sig_all], p_all[sig_all])
-            self.meta_model.fit(meta_X, meta_y)
+        meta_y = (c_all == y).astype(int)
+        meta_X = self._build_meta_features(X, p_all)
+        self.meta_model.fit(meta_X, meta_y)
 
         mdi_df, mda_df = compute_mdi_mda(
             self.primary_model.booster,
@@ -180,9 +168,10 @@ class TrainValidator:
         selected = sorted(mdi_keep.intersection(mda_keep))
 
         oos_signal = self._signal_from_class(oos_cls)
-        oos_mask = oos_signal != 0
+        oos_signal[~oos_keep] = 0
+        oos_mask = oos_keep
         oos_precision = float(np.mean((oos_cls[oos_mask] == y[oos_mask]).astype(float))) if oos_mask.any() else 0.0
-        oos_recall = float(np.sum((oos_cls[oos_mask] == y[oos_mask]).astype(float)) / max(1, np.sum(y != 1)))
+        oos_recall = float(np.sum((oos_cls[oos_mask] == y[oos_mask]).astype(float)) / max(1, len(y)))
         oos_macro_f1 = float(f1_score(y, oos_cls, average="macro", zero_division=0))
         oos_sharpe = annualized_sharpe(returns[oos_mask]) if oos_mask.any() else 0.0
 
