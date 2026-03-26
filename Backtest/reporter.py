@@ -63,6 +63,7 @@ _PARAM_META: Dict[str, Dict[str, str]] = {
     "model_sell_path": {"label": "卖模型路径", "format": "str"},
     "meta_buy_path": {"label": "买模型元信息路径", "format": "str"},
     "meta_sell_path": {"label": "卖模型元信息路径", "format": "str"},
+    "meta_model_path": {"label": "Meta模型路径", "format": "str"},
 }
 
 _PARAM_ORDER = [
@@ -85,12 +86,14 @@ _PARAM_ORDER = [
     "model_sell_path",
     "meta_buy_path",
     "meta_sell_path",
+    "meta_model_path",
 ]
 
 
 # Limit heavy payload in detail HTML to avoid slow/blocked rendering on large backtests.
 _DETAIL_REPORT_MAX_PLOT_POINTS = 4000
-_DETAIL_REPORT_MAX_TRADE_EVENTS = 5000
+# 0 means no capping: keep complete executed trade events in detail report.
+_DETAIL_REPORT_MAX_TRADE_EVENTS = 0
 
 
 def _is_invalid_number(value: object) -> bool:

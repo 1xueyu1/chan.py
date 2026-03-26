@@ -13,6 +13,7 @@ from .chan_signal_extractor import extract_raw_bsp_events
 from .config import BacktestConfig
 from .data_loader import load_symbol_bars
 from .event_replay import load_scored_events_by_symbol
+from .feature_adapter import enrich_raw_events_with_feature_engine
 from .model_gate import DualModelGate
 from .reporter import write_outputs
 from .signal_builder import build_signal_matrix, validate_no_lookahead
@@ -32,6 +33,17 @@ def _run_single_symbol_backtest(
     else:
         gate = DualModelGate(config)
         raw_events = extract_raw_bsp_events(config, symbol)
+        try:
+            raw_events = enrich_raw_events_with_feature_engine(
+                symbol=symbol,
+                bars=bars,
+                raw_events=raw_events,
+            )
+        except Exception as ex:
+            print(
+                f"[WARN] feature adapter failed for {symbol}: {ex}. "
+                "Fallback to raw feature_map."
+            )
         scored_events = gate.score_events(raw_events)
 
     signal_matrix = build_signal_matrix(
@@ -40,6 +52,7 @@ def _run_single_symbol_backtest(
         allow_short=config.allow_short,
         execution_mode=config.execution_mode,
         conflict_policy=config.conflict_policy,
+        cooldown_bars=config.cooldown_bars,
     )
     validate_no_lookahead(signal_matrix, config.execution_mode)
 
@@ -199,6 +212,7 @@ def run_vectorbt_backtest(
             "model_sell_path": config.model_sell_path,
             "meta_buy_path": config.meta_buy_path,
             "meta_sell_path": config.meta_sell_path,
+            "meta_model_path": config.meta_model_path or "auto_detect",
         },
     )
 

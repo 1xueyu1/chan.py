@@ -27,6 +27,7 @@ def build_signal_matrix(
     allow_short: bool,
     execution_mode: str,
     conflict_policy: str = "exit_first",
+    cooldown_bars: int = 0,
 ) -> SignalMatrix:
     if conflict_policy != "exit_first":
         raise ValueError("Only conflict_policy=exit_first is supported")
@@ -51,8 +52,16 @@ def build_signal_matrix(
         execution_pairs.append((event.exec_time, bars_index[loc]))
 
     current_pos = 0
+    cooldown_remaining = 0
     for i, ts in enumerate(bars_index):
         events = by_loc.get(i, [])
+
+        if cooldown_remaining > 0:
+            position.iat[i] = current_pos
+            signal.iat[i] = 0
+            cooldown_remaining -= 1
+            continue
+
         has_buy = any(ev.signal == 1 for ev in events)
         has_sell = any(ev.signal == -1 for ev in events)
 
@@ -107,6 +116,8 @@ def build_signal_matrix(
 
         signal.iat[i] = action
         position.iat[i] = current_pos
+        if action != 0 and cooldown_bars > 0:
+            cooldown_remaining = cooldown_bars
 
     return SignalMatrix(
         long_entries=long_entries,

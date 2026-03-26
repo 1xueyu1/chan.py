@@ -56,6 +56,8 @@ class BacktestConfig:
     slippage: float = 0.0001
 
     signal_threshold: float = 0.55
+    signal_margin: float = 0.0
+    cooldown_bars: int = 0
     allow_short: bool = False
     execution_mode: str = "next_bar_open"
     conflict_policy: str = "exit_first"
@@ -67,6 +69,7 @@ class BacktestConfig:
     model_sell_path: str = "Debug/model_sell.json"
     meta_buy_path: str = "Debug/meta_buy.json"
     meta_sell_path: str = "Debug/meta_sell.json"
+    meta_model_path: str = ""
 
     event_replay_mode: bool = False
     event_replay_csv_path: str = "result/model_signal_events.csv"
@@ -101,6 +104,10 @@ class BacktestConfig:
             raise ValueError("unsupported conflict_policy")
         if not (0 <= self.signal_threshold <= 1):
             raise ValueError("signal_threshold must be in [0, 1]")
+        if self.signal_margin < 0:
+            raise ValueError("signal_margin must be >= 0")
+        if self.cooldown_bars < 0:
+            raise ValueError("cooldown_bars must be >= 0")
         if self.initial_cash <= 0:
             raise ValueError("initial_cash must be > 0")
         if self.kl_type not in KL_TYPE_TEXT_TO_ENUM.values():
@@ -122,6 +129,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fee", type=float, default=0.0004)
     parser.add_argument("--slippage", type=float, default=0.0001)
     parser.add_argument("--signal-threshold", type=float, default=0.55)
+    parser.add_argument("--signal-margin", type=float, default=0.0)
+    parser.add_argument("--cooldown-bars", type=int, default=0)
 
     parser.add_argument("--allow-short", action="store_true")
     parser.add_argument("--execution-mode", default="next_bar_open", choices=["next_bar_open", "close"])
@@ -147,6 +156,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-sell-path", default="Debug/model_sell.json")
     parser.add_argument("--meta-buy-path", default="Debug/meta_buy.json")
     parser.add_argument("--meta-sell-path", default="Debug/meta_sell.json")
+    parser.add_argument(
+        "--meta-model-path",
+        default="",
+        help="optional meta model artifact path (meta_model.pkl). If empty, auto-detect beside model_buy_path",
+    )
 
     parser.add_argument(
         "--event-replay",
@@ -188,6 +202,8 @@ def config_from_args(args: argparse.Namespace) -> BacktestConfig:
         fee=args.fee,
         slippage=args.slippage,
         signal_threshold=args.signal_threshold,
+        signal_margin=args.signal_margin,
+        cooldown_bars=args.cooldown_bars,
         allow_short=bool(args.allow_short),
         execution_mode=args.execution_mode,
         symbol_workers=args.symbol_workers,
@@ -197,6 +213,7 @@ def config_from_args(args: argparse.Namespace) -> BacktestConfig:
         model_sell_path=args.model_sell_path,
         meta_buy_path=args.meta_buy_path,
         meta_sell_path=args.meta_sell_path,
+        meta_model_path=args.meta_model_path,
         event_replay_mode=bool(args.event_replay),
         event_replay_csv_path=args.event_replay_csv,
         replay_reapply_threshold=bool(args.replay_reapply_threshold),
