@@ -3,31 +3,31 @@
 币安期货多币种 K 线数据下载 + 合并工具
 
 功能：
-  1. 批量下载多个永续合约月度 K 线数据（默认 1m）
-  2. 自动解压 ZIP，去重排序后合并为 Parquet 文件
-  3. 输出到 ./data/<BASE>_<INTERVAL>.parquet
-     （例：BTCUSDT -> data/BTC_1m.parquet）
+  1. 自动发现 Binance 全量 USDT 永续合约币种（数字货币）
+    2. 使用 Binance 接口估算币种市值，保留市值 >= 5000 万美元的币
+  3. 仅下载与输出 15m 周期数据，并清理 data 目录下非 15m 产物
+  4. 自动解压 ZIP，去重排序后合并为 Parquet 文件
 
 用法：
-  python binance_btc_downloader.py                            # 下载并合并全部
-  python binance_btc_downloader.py --symbols BTC ETH SOL      # 只处理指定币种
-  python binance_btc_downloader.py --start-date 2023-01-01    # 指定开始日期
-  python binance_btc_downloader.py --merge-only               # 仅合并，跳过下载
-  python binance_btc_downloader.py --download-only            # 仅下载，跳过合并
-  python binance_btc_downloader.py --intervals 1m 5m 15m      # 指定时间框架
+  python binance_data_parquet_downloader.py                   # 自动筛币并下载15m
+  python binance_data_parquet_downloader.py --symbols BTC ETH # 只处理指定币种
+  python binance_data_parquet_downloader.py --start-date 2023-01-01
+  python binance_data_parquet_downloader.py --merge-only
+  python binance_data_parquet_downloader.py --download-only
 """
 
 import sys
 import urllib.request
 import urllib.error
 import zipfile
+import json
+import gzip
 from pathlib import Path
 from datetime import datetime
 from argparse import ArgumentParser, RawDescriptionHelpFormatter
 import time
-from typing import List, Optional
-import threading
-from queue import Queue
+from typing import Dict, List, Optional, Tuple
+from multiprocessing import Pool
 import logging
 
 try:
@@ -47,31 +47,22 @@ class Config:
 
     # ---------- Binance 数据源 ----------
     BASE_URL = "https://data.binance.vision"
+    FUTURES_EXCHANGE_INFO_URL = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+    SPOT_PRODUCTS_URL = "https://www.binance.com/bapi/asset/v2/public/asset-service/product/get-products?includeEtf=true"
 
     # ---------- 要下载的交易对（USDT 永续合约） ----------
-    SYMBOLS = [
-        "BTCUSDT",
-        "ETHUSDT",
-        "BNBUSDT",
-        "SOLUSDT",
-        "ADAUSDT",
-        "AVAXUSDT",
-        "DOTUSDT",
-        "LTCUSDT",
-        "XRPUSDT",
-        "DOGEUSDT",
-    ]
+    # 为空表示自动拉取 Binance 全量 USDT 永续币种，再按市值阈值筛选。
+    SYMBOLS: List[str] = []
 
     # ---------- 时间框架 ----------
-    # 默认只下载 5m；可指定多个：["1m", "5m", "15m"]
-    INTERVALS = ["5m"]
+    # 仅保留 15m 数据。
+    INTERVALS = ["15m"]
 
-    # 所有支持的时间框架（供命令行 choices 使用）
-    SUPPORTED_INTERVALS = [
-        "1m", "3m", "5m", "15m", "30m",
-        "1h", "2h", "4h", "6h", "8h", "12h",
-        "1d", "3d", "1w", "1mo",
-    ]
+    # 为避免误下载 5m/1m，仅允许 15m。
+    SUPPORTED_INTERVALS = ["15m"]
+
+    # ---------- 币种市值筛选 ----------
+    MIN_MARKET_CAP_USD = 50_000_000
 
     # ---------- 数据类型：只下载月度数据 ----------
     DOWNLOAD_MONTHLY = True
@@ -178,8 +169,80 @@ class BinanceMultiDownloader:
         self.verbose = verbose if verbose is not None else Config.VERBOSE
 
         self.stats = DownloadStats()
-        self._queue: Queue = Queue()
-        self._lock = threading.Lock()
+
+    # ------------------------------------------------------------------ #
+    #  币种发现与市值筛选
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _fetch_json(url: str) -> dict:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(req, timeout=Config.TIMEOUT) as resp:
+            data = resp.read()
+            # 检测gzip压缩
+            if data[:2] == b'\x1f\x8b':
+                data = gzip.decompress(data)
+            return json.loads(data.decode("utf-8"))
+
+    def _discover_futures_symbols(self) -> List[str]:
+        payload = self._fetch_json(Config.FUTURES_EXCHANGE_INFO_URL)
+        symbols: List[str] = []
+        for item in payload.get("symbols", []):
+            if item.get("status") != "TRADING":
+                continue
+            if item.get("contractType") != "PERPETUAL":
+                continue
+            if item.get("quoteAsset") != "USDT":
+                continue
+            if item.get("underlyingType") != "COIN":
+                continue
+            symbol = item.get("symbol")
+            if symbol and symbol.endswith("USDT"):
+                symbols.append(symbol)
+        return sorted(set(symbols))
+
+    def _fetch_base_market_caps(self) -> Dict[str, float]:
+        payload = self._fetch_json(Config.SPOT_PRODUCTS_URL)
+        market_caps: Dict[str, float] = {}
+        for row in payload.get("data", []):
+            base = row.get("b")
+            cs = row.get("cs")
+            close_price = row.get("c")
+            if not base or cs in (None, "") or close_price in (None, ""):
+                continue
+            try:
+                cap = float(cs) * float(close_price)
+            except (TypeError, ValueError):
+                continue
+            if cap <= 0:
+                continue
+            old = market_caps.get(base)
+            if old is None or cap > old:
+                market_caps[base] = cap
+        return market_caps
+
+    def _filter_symbols_by_market_cap(self, symbols: List[str], min_cap_usd: float) -> List[str]:
+        market_caps = self._fetch_base_market_caps()
+        kept: List[str] = []
+        dropped = 0
+        for symbol in symbols:
+            base = symbol.replace("USDT", "")
+            cap = market_caps.get(base, 0.0)
+            if cap >= min_cap_usd:
+                kept.append(symbol)
+            else:
+                dropped += 1
+        logger.info(
+            "市值筛选完成: 候选 %d -> 保留 %d (阈值 >= %.0f USD, 剔除 %d)",
+            len(symbols),
+            len(kept),
+            min_cap_usd,
+            dropped,
+        )
+        return kept
 
     # ------------------------------------------------------------------ #
     #  URL 构造
@@ -218,27 +281,21 @@ class BinanceMultiDownloader:
     #  单文件下载（幂等 + 重试）
     # ------------------------------------------------------------------ #
 
-    def _download_file(self, url: str, save_path: Path) -> bool:
+    def _download_file(self, url: str, save_path: Path) -> Dict[str, int]:
+        """下载单个文件，返回统计信息字典"""
         # ZIP 已存在 -> 跳过
         if save_path.exists():
-            with self._lock:
-                self.stats.skipped_files += 1
-            return True
+            return {"skipped": 1, "downloaded": 0, "failed": 0, "size": 0}
         # 解压后的 CSV 已存在 -> 跳过
         if save_path.with_suffix(".csv").exists():
-            with self._lock:
-                self.stats.skipped_files += 1
-            return True
+            return {"skipped": 1, "downloaded": 0, "failed": 0, "size": 0}
 
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
         for attempt in range(Config.MAX_RETRIES):
             try:
                 if self.verbose:
-                    logger.info(f"[DL] {save_path.name}")
-                else:
-                    sys.stdout.write(".")
-                    sys.stdout.flush()
+                    print(f"[DL] {save_path.name}", flush=True)
 
                 resp = urllib.request.urlopen(url, timeout=Config.TIMEOUT)
                 file_size = int(resp.getheader("content-length", 0))
@@ -253,36 +310,28 @@ class BinanceMultiDownloader:
 
                 tmp.rename(save_path)
 
-                with self._lock:
-                    self.stats.downloaded_files += 1
-                    self.stats.total_size += file_size
-
                 if self.verbose:
-                    logger.info(f"[OK] {save_path.name} ({file_size / 1_048_576:.2f} MB)")
+                    print(f"[OK] {save_path.name} ({file_size / 1_048_576:.2f} MB)", flush=True)
 
                 if self.extract:
                     self._extract_zip(save_path)
 
-                return True
+                return {"skipped": 0, "downloaded": 1, "failed": 0, "size": file_size}
 
             except urllib.error.HTTPError as e:
                 if e.code == 404:
                     # 该月份数据不存在（正常情况，不记为失败）
-                    with self._lock:
-                        self.stats.skipped_files += 1
-                    return False
+                    return {"skipped": 1, "downloaded": 0, "failed": 0, "size": 0}
                 if self.verbose:
-                    logger.warning(f"HTTP {e.code}: {url}")
+                    print(f"HTTP {e.code}: {url}", flush=True)
             except Exception as e:
                 if self.verbose:
-                    logger.warning(f"下载出错 ({attempt + 1}/{Config.MAX_RETRIES}): {e}")
+                    print(f"下载出错 ({attempt + 1}/{Config.MAX_RETRIES}): {e}", flush=True)
 
             if attempt < Config.MAX_RETRIES - 1:
                 time.sleep(Config.RETRY_DELAY)
 
-        with self._lock:
-            self.stats.failed_files += 1
-        return False
+        return {"skipped": 0, "downloaded": 0, "failed": 1, "size": 0}
 
     # ------------------------------------------------------------------ #
     #  解压
@@ -303,64 +352,52 @@ class BinanceMultiDownloader:
     #  工作线程
     # ------------------------------------------------------------------ #
 
-    def _worker(self):
-        while True:
-            item = self._queue.get()
-            if item is None:
-                break
-            self._download_file(*item)
-            self._queue.task_done()
+    def _worker_task(self, task: Tuple[str, Path]) -> Dict[str, int]:
+        """进程池工作任务：下载单个文件，返回统计信息"""
+        url, save_path = task
+        return self._download_file(url, save_path)
 
     # ------------------------------------------------------------------ #
-    #  批量下载
+    #  单币种下载
     # ------------------------------------------------------------------ #
 
-    def download_all(
+    def download_symbol(
         self,
-        symbols: List[str],
+        symbol: str,
         intervals: List[str],
         start_date: str,
         end_date: str,
     ):
-        self.stats.start_time = datetime.now()
+        months = self._month_range(start_date, end_date)
+        logger.info(
+            f"\n[{symbol}] 排队 {len(months)} 个月 x {len(intervals)} 个间隔"
+        )
+        self.stats.total_files += len(months) * len(intervals)
 
-        threads = [
-            threading.Thread(target=self._worker, daemon=True)
-            for _ in range(self.max_workers)
-        ]
-        for t in threads:
-            t.start()
+        if not self.verbose:
+            print(f"[{symbol}] 下载进度: ", end="", flush=True)
 
-        for symbol in symbols:
-            months = self._month_range(start_date, end_date)
-            logger.info(
-                f"\n[{symbol}] 排队 {len(months)} 个月 x {len(intervals)} 个间隔"
-            )
-            with self._lock:
-                self.stats.total_files += len(months) * len(intervals)
+        tasks: List[Tuple[str, Path]] = []
+        for interval in intervals:
+            for month in months:
+                url = self._build_url(symbol, interval, month, "monthly")
+                filename = f"{symbol}-{interval}-{month}.zip"
+                save_path = self.raw_dir / symbol / interval / filename
+                tasks.append((url, save_path))
 
-            if not self.verbose:
-                print(f"[{symbol}] 下载进度: ", end="", flush=True)
+        # 使用进程池并行下载
+        with Pool(processes=self.max_workers) as pool:
+            for result in pool.imap_unordered(self._worker_task, tasks, chunksize=2):
+                self.stats.downloaded_files += result.get("downloaded", 0)
+                self.stats.failed_files += result.get("failed", 0)
+                self.stats.skipped_files += result.get("skipped", 0)
+                self.stats.total_size += result.get("size", 0)
+                if not self.verbose:
+                    sys.stdout.write(".")
+                    sys.stdout.flush()
 
-            for interval in intervals:
-                for month in months:
-                    url = self._build_url(symbol, interval, month, "monthly")
-                    filename = f"{symbol}-{interval}-{month}.zip"
-                    save_path = self.raw_dir / symbol / interval / filename
-                    self._queue.put((url, save_path))
-
-            # 等当前 symbol 全部下载完再继续
-            self._queue.join()
-            if not self.verbose:
-                print()
-
-        for _ in threads:
-            self._queue.put(None)
-        for t in threads:
-            t.join()
-
-        self.stats.end_time = datetime.now()
-        self._print_download_summary()
+        if not self.verbose:
+            print()
 
     # ------------------------------------------------------------------ #
     #  合并 CSV -> Parquet
@@ -422,7 +459,7 @@ class BinanceMultiDownloader:
         # 删除无意义的 ignore 列
         result = result.drop(columns=["ignore"])
 
-        # 输出路径：data/BTC_1m.parquet
+        # 输出路径：data/BTC_15m.parquet
         base = symbol.replace("USDT", "")
         out_path = self.output_dir / f"{base}_{interval}.parquet"
         result.to_parquet(out_path, index=False, engine="pyarrow", compression="snappy")
@@ -464,6 +501,53 @@ class BinanceMultiDownloader:
         logger.info("=" * Config.SEPARATOR_LENGTH)
 
     # ------------------------------------------------------------------ #
+    #  输出清理（仅保留目标时间框架）
+    # ------------------------------------------------------------------ #
+
+    def _cleanup_non_target_intervals(self, intervals: List[str]):
+        keep = set(intervals)
+
+        removed_parquet = 0
+        for p in self.output_dir.glob("*_*.parquet"):
+            stem_parts = p.stem.split("_")
+            if not stem_parts:
+                continue
+            interval = stem_parts[-1]
+            if interval not in keep:
+                try:
+                    p.unlink()
+                    removed_parquet += 1
+                except Exception as e:
+                    logger.warning(f"删除旧 Parquet 失败 {p}: {e}")
+
+        removed_raw_dirs = 0
+        if self.raw_dir.exists():
+            for symbol_dir in self.raw_dir.iterdir():
+                if not symbol_dir.is_dir():
+                    continue
+                for interval_dir in symbol_dir.iterdir():
+                    if not interval_dir.is_dir():
+                        continue
+                    if interval_dir.name not in keep:
+                        try:
+                            for f in interval_dir.rglob("*"):
+                                if f.is_file():
+                                    f.unlink()
+                            for d in sorted(interval_dir.rglob("*"), reverse=True):
+                                if d.is_dir():
+                                    d.rmdir()
+                            interval_dir.rmdir()
+                            removed_raw_dirs += 1
+                        except Exception as e:
+                            logger.warning(f"删除旧原始目录失败 {interval_dir}: {e}")
+
+        logger.info(
+            "已清理非目标周期数据: 删除 Parquet %d 个, 删除原始周期目录 %d 个",
+            removed_parquet,
+            removed_raw_dirs,
+        )
+
+    # ------------------------------------------------------------------ #
     #  完整流程入口
     # ------------------------------------------------------------------ #
 
@@ -476,29 +560,50 @@ class BinanceMultiDownloader:
         do_download: bool = True,
         do_merge: bool = True,
     ):
-        symbols = symbols or Config.SYMBOLS
         intervals = intervals or Config.INTERVALS
         start_date = start_date or Config.DEFAULT_START_DATE
         end_date = end_date or datetime.now().strftime("%Y-%m-%d")
 
+        if symbols:
+            symbols = sorted(set(symbols))
+        else:
+            discovered = self._discover_futures_symbols()
+            symbols = self._filter_symbols_by_market_cap(discovered, Config.MIN_MARKET_CAP_USD)
+
+        if not symbols:
+            raise RuntimeError("市值筛选后无可下载币种，请检查网络或阈值配置")
+
+        self._cleanup_non_target_intervals(intervals)
+
         logger.info("=" * Config.SEPARATOR_LENGTH)
         logger.info("币安期货多币种 K 线数据工具")
         logger.info("-" * Config.SEPARATOR_LENGTH)
-        logger.info(f"  币种    : {', '.join(symbols)}")
+        logger.info(f"  币种数量: {len(symbols)}")
         logger.info(f"  间隔    : {', '.join(intervals)}")
+        logger.info(f"  市值阈值: >= {Config.MIN_MARKET_CAP_USD:,} USD")
         logger.info(f"  日期    : {start_date} -> {end_date}")
         logger.info(f"  原始目录: {self.raw_dir.absolute()}")
         logger.info(f"  输出目录: {self.output_dir.absolute()}")
         logger.info("=" * Config.SEPARATOR_LENGTH)
 
-        if do_download:
-            self.download_all(symbols, intervals, start_date, end_date)
+        if self.verbose:
+            logger.info("筛选后币种列表: %s", ", ".join(symbols))
 
-        if do_merge:
-            logger.info("\n开始合并 CSV -> Parquet ...")
-            for symbol in symbols:
+        self.stats.start_time = datetime.now()
+
+        for symbol in symbols:
+            if do_download:
+                self.download_symbol(symbol, intervals, start_date, end_date)
+
+            if do_merge:
+                logger.info(f"[{symbol}] 开始合并 CSV -> Parquet ...")
                 for interval in intervals:
                     self.merge_to_parquet(symbol, interval)
+
+        self.stats.end_time = datetime.now()
+        if do_download:
+            self._print_download_summary()
+        if do_merge:
             logger.info("\n全部合并完成！")
             logger.info(f"文件位置: {self.output_dir.absolute()}")
 
@@ -507,46 +612,38 @@ class BinanceMultiDownloader:
 #                       命令行接口
 # ==============================================================
 
-# 币种缩写 -> 完整交易对的映射（供命令行 --symbols 使用）
-_SYMBOL_MAP = {s.replace("USDT", ""): s for s in Config.SYMBOLS}
-
-
 def main():
     parser = ArgumentParser(
         description="币安期货多币种 K 线下载 & 合并工具",
         formatter_class=RawDescriptionHelpFormatter,
         epilog="""
 示例：
-  # 下载并合并全部 11 个币种（默认 1m，2020 至今）
-  python binance_btc_downloader.py
+  # 自动获取全量USDT永续币种，按市值阈值筛选并下载15m
+  python binance_data_parquet_downloader.py
 
-  # 只处理 BTC 和 ETH，从 2023 年开始
-  python binance_btc_downloader.py --symbols BTC ETH --start-date 2023-01-01
+  # 仅处理指定币种（可写 BTC 或 BTCUSDT）
+  python binance_data_parquet_downloader.py --symbols BTC ETH SOL
+
+  # 从 2023 年开始
+  python binance_data_parquet_downloader.py --start-date 2023-01-01
 
   # 只合并已下载的原始 CSV（跳过网络下载）
-  python binance_btc_downloader.py --merge-only
-
-  # 只下载，不合并
-  python binance_btc_downloader.py --download-only
-
-  # 同时下载 1m 和 5m
-  python binance_btc_downloader.py --intervals 1m 5m
+  python binance_data_parquet_downloader.py --merge-only
 """,
     )
 
     parser.add_argument(
         "--symbols",
         nargs="+",
-        choices=sorted(_SYMBOL_MAP.keys()),
         metavar="SYMBOL",
-        help=f"指定币种，可选：{', '.join(sorted(_SYMBOL_MAP.keys()))}（默认全部）",
+        help="指定币种（支持 BTC 或 BTCUSDT，默认自动发现并按市值筛选）",
     )
     parser.add_argument(
         "--intervals",
         nargs="+",
         choices=Config.SUPPORTED_INTERVALS,
         default=Config.INTERVALS,
-        help=f"时间框架（默认：{' '.join(Config.INTERVALS)}）",
+        help="时间框架（仅支持15m）",
     )
     parser.add_argument(
         "--start-date",
@@ -572,7 +669,7 @@ def main():
         "--workers",
         type=int,
         default=Config.MAX_WORKERS,
-        help=f"并发下载线程数（默认：{Config.MAX_WORKERS}）",
+        help=f"并发下载进程数（默认：{Config.MAX_WORKERS}）",
     )
     parser.add_argument(
         "--merge-only",
@@ -597,7 +694,15 @@ def main():
 
     args = parser.parse_args()
 
-    symbols = [_SYMBOL_MAP[s] for s in args.symbols] if args.symbols else None
+    symbols = None
+    if args.symbols:
+        symbols = []
+        for s in args.symbols:
+            token = s.upper().strip()
+            if not token:
+                continue
+            symbols.append(token if token.endswith("USDT") else f"{token}USDT")
+
     extract = False if args.no_extract else None   # None -> 使用 Config.AUTO_EXTRACT
 
     downloader = BinanceMultiDownloader(
