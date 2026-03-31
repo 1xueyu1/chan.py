@@ -14,6 +14,13 @@
 - 核心框架：`ml_layer/`
 - 回测门控兼容层：`Backtest/model_gate.py`
 
+运行环境固定约定：
+- 统一使用 conda 环境：`chan`。
+- 默认已执行 `conda activate chan` 后再运行训练/回测命令。
+- 该约定为长期默认项，流程内不再重复提示环境切换。
+- 全流程默认后台运行（`nohup ... &`），保证终端关闭后任务不被中断。
+- 新的 full 实验启动前，默认先清理同项目下旧 run 相关进程（`--kill-existing-runs-before-start`）。
+
 ## 2. 核心定位（为什么需要这个框架）
 
 TrainValidator 架构的核心目标是在严格防泄露前提下，完成一套可回放、可解释、可并行扩展的交易信号学习系统：
@@ -42,6 +49,7 @@ TrainValidator 架构的核心目标是在严格防泄露前提下，完成一�
 - 新增代码和脚本必须默认面向二分类语义。
 - 所有训练、推理、回测入口不得引入旧 TIMEOUT 训练逻辑。
 - 参数中保留的 timeout 相关项仅用于兼容 CLI，不参与当前标签判定。
+- 每次迭代必须在 `backup/` 保留统一备份快照，且与当期架构说明文档绑定。
 
 ## 4. 性能优先原则（实现约束）
 
@@ -49,6 +57,7 @@ TrainValidator 架构的核心目标是在严格防泄露前提下，完成一�
 - 样本采集层：按 symbol 多进程采集。
 - 特征层：按 symbol 并发构建特征。
 - 标签层：基于 numpy 数组扫描 OHLC，减少字典与 DataFrame 热点。
+- 缓存层：按 symbol + 配置哈希落盘 Parquet（label/feature 双缓存）。
 - 重要性评估：MDA 支持采样 + 并发。
 - 报告层：SHAP 支持样本上限，避免解释阶段拖慢主流程。
 
@@ -63,10 +72,11 @@ TrainValidator 架构的核心目标是在严格防泄露前提下，完成一�
 1. `run_pipeline.py` 根据 mode 组装 train/predict/backtest 命令。
 2. 训练阶段调用 `xgboost_shap_train.py`。
 3. 训练脚本采集事件与K线，进入 `LabelEngine.transform` 打标签。
-4. `FeatureEngine.transform` 构建并归一化特征矩阵。
-5. `TrainValidator.fit` 执行 PurgedKFold + 两层模型训练 + OOS 聚合。
-6. 生成模型与报告产物并落盘（模型、特征映射、可视化、manifest）。
-7. 回测阶段由 `Backtest/model_gate.py` 加载模型并执行信号门控。
+4. 标签阶段优先读取 `LabelCache`；未命中时再计算并回写缓存。
+5. 特征阶段优先读取 `CachedFeatureEngine` 的 per-symbol 特征缓存；未命中时并发计算并回写缓存。
+6. 合并特征后执行归一化，进入 `TrainValidator.fit` 训练与验证。
+7. 生成模型与报告产物并落盘（模型、特征映射、可视化、manifest）。
+8. 回测阶段由 `Backtest/model_gate.py` 加载模型并执行信号门控。
 
 数据对象主线：
 - 原始对象：`events`、`bars`
@@ -150,7 +160,7 @@ TrainValidator 架构的核心目标是在严格防泄露前提下，完成一�
 
 ## 8. 特征引擎（FeatureEngine）
 
-实现文件：`ml_layer/feature_engine/engine.py`
+实现文件：`ml_layer/feature_engine/engine.py`、`ml_layer/feature_engine/cached_engine.py`
 
 ### 8.1 输入与输出
 
@@ -164,14 +174,20 @@ TrainValidator 架构的核心目标是在严格防泄露前提下，完成一�
 - `_transform_symbol_samples` 按 symbol 顺序生成样本特征。
 - 支持 `FeatureConfig.symbol_workers` 并发。
 
-2. 多组特征融合
+2. 缓存增强（`CachedFeatureEngine`）
+- 缓存键：`symbol + feature_config_hash`。
+- 缓存介质：`data/cache/features/*.parquet`。
+- 逻辑：先按 symbol 查缓存，未命中 symbol 再并发计算，完成后立即写回缓存。
+- 兼容：关闭缓存时自动回退到原始 `FeatureEngine.transform`。
+
+3. 多组特征融合
 - 结构上下文特征。
 - 多级别共振特征。
 - 价量微观结构特征。
 - 市场状态特征（波动/趋势/近期胜率等）。
 - 历史遗留特征融合层，保证兼容过往特征语义。
 
-3. 实时一致性
+4. 实时一致性
 - 离线训练用 `fit_transform`。
 - 在线推理用 `transform_realtime`，保证归一化口径一致。
 
@@ -242,6 +258,124 @@ TrainValidator 架构的核心目标是在严格防泄露前提下，完成一�
 - 是训练阶段唯一主协调器。
 - 聚合了训练、验证、特征解释、准入判定（pass_criteria）。
 
+### 10.6 双模型诊断产物（新增）
+
+训练阶段会额外输出双模型诊断：
+
+- `dual_model_diagnostics.json`
+- `primary_confidence_bucket_returns.csv`
+- `meta_threshold_sensitivity.csv`
+
+诊断项覆盖：
+
+- Primary：类别分布与方向偏置、`bsp_type` 分组正确率、置信度分桶收益、月度/季度稳定性。
+- Meta：`0.45~0.70` 阈值敏感性（收益/回撤/交易数）、Brier/LogLoss 校准、误杀漏放占比、特征依赖集中度。
+
+该报告用于优先发现双模型失衡问题，再进入参数/特征迭代。
+
+## 11. 缓存层（新增）
+
+实现文件：`ml_layer/cache_layer.py`
+
+### 11.1 设计目标
+
+- 用空间换时间，避免重复训练中对确定性中间结果反复重算。
+- 提供统一缓存接口，降低训练脚本侵入。
+- 支持按配置自动失效（哈希变更即命中新文件）。
+
+### 11.2 组件
+
+- `LabelCache`
+  - 目录：`data/cache/labels/<namespace>/`（`default` 命名空间兼容历史目录）
+  - 键：`{symbol}_{label_config_hash}.parquet`
+  - 内容：`LabelEngine.transform` 输出样本记录。
+- `FeatureCache`
+  - 目录：`data/cache/features/<namespace>/`（`default` 命名空间兼容历史目录）
+  - 键：`{symbol}_{feature_config_hash}.parquet`
+  - 内容：按 symbol 存储的特征 DataFrame。
+
+命名空间用途：
+
+- 同一实验续跑：固定同一个 namespace。
+- 模型代际切换：切换到新 namespace，避免误复用旧缓存。
+
+### 11.3 关键函数
+
+- `_config_hash(config)`: 基于配置内容生成短哈希。
+- `get_label_cache(namespace=...)` / `get_feature_cache(namespace=...)`: 命名空间隔离缓存实例。
+- `cache_stats(namespace=...)`: 返回命名空间级 hit/miss、大小、文件数统计。
+- `clear_cache_namespace(namespace)`: 清空指定命名空间缓存。
+- `clear_all_caches()`: 清空 labels/features 缓存目录。
+
+### 11.4 训练入口接入点
+
+训练脚本 `Debug/xgboost_shap_train.py` 已接入：
+
+- 标签缓存开关：`--disable-label-cache`
+- 特征缓存开关：`--disable-feature-cache`
+- 一键清空缓存：`--clear-cache`
+- 缓存模式：`--cache-mode resume|fresh`
+- 缓存命名空间：`--cache-namespace <name>`
+
+并在训练结束输出缓存命中统计。
+
+模式语义：
+
+- `resume`: 复用缓存（命中后跳过重复计算），适用于长任务中断后续跑。
+- `fresh`: 先清空命名空间并禁用缓存，强制全量重算。
+
+## 12. 统一流水线参数透传（新增）
+
+实现文件：`Debug/run_pipeline.py`
+
+新增参数并透传到训练阶段：
+
+- `--disable-label-cache`
+- `--disable-feature-cache`
+- `--clear-cache`
+- `--cache-mode`
+- `--cache-namespace`
+- `--resume-from-run-id`
+- `--kill-existing-runs-before-start`
+
+用途：
+- 正常训练默认启用缓存。
+- A/B 评估可通过 disable 参数关闭缓存对比耗时。
+- 维护时可通过 clear 参数先清缓存再运行。
+- 新 full 实验默认先清理旧进程，避免多轮并行导致资源争抢与日志混淆。
+
+## 13. 缓存运维工具（新增）
+
+实现文件：`Script/cache_manager.py`
+
+支持命令：
+
+- `stats`: 查看标签/特征缓存统计
+- `clear`: 清空全部缓存
+- `clear-labels`: 仅清空标签缓存
+- `clear-features`: 仅清空特征缓存
+- `list-labels`: 列出标签缓存文件
+- `list-features`: 列出特征缓存文件
+
+## 10.7 回测综合优化目标（新增）
+
+阈值调优统一采用 `v1_backtest_composite`：
+
+- 硬约束：年化收益率上升、最大回撤不恶化、Sharpe 不下降、交易数在合理区间。
+- 软目标：在满足硬约束后，按加权综合分数排序。
+
+对应脚本：`Debug/tune_backtest_threshold.py`。
+
+## 10.8 迭代看板（新增）
+
+`run_pipeline.py` 每次运行输出 `iteration_dashboard.json`，固定展示：
+
+- 收益、回撤、Sharpe、胜率、交易数
+- 阈值参数（`signal_threshold`、`signal_margin`、`cooldown_bars`）
+- 各阶段耗时与时间线
+
+该看板用于跨 run 的同口径对比，避免主观判断偏差。
+
 ## 11. 特征重要性（MDI + MDA）
 
 实现文件：`ml_layer/validation/feature_importance.py`
@@ -310,6 +444,10 @@ TrainValidator 架构的核心目标是在严格防泄露前提下，完成一�
 
 4. 空信号兜底
 - 若阈值过滤后无任何信号，触发分位数自适应保底，避免回测全空。
+
+5. 防未来函数执行约束
+- 事件特征对齐时，`t0_pos` 采用 `floor(exec_time)`（仅映射到当前或历史K线），禁止“最近邻”落到未来K线。
+- `next_bar_open` 执行模式下，成交K线时间必须严格满足 `fill_ts > signal_ts`，否则立即抛错。
 
 ### 13.3 在框架中的作用
 

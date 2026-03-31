@@ -45,14 +45,17 @@ def _default_code_files(project_root: Path) -> List[Path]:
     rels = [
         "Debug/xgboost_shap_train.py",
         "Debug/xgboost_shap_predict.py",
-        "Debug/run_full_pipeline.py",
-        "Debug/run_predict_backtest.py",
+        "Debug/run_pipeline.py",
+        "Debug/tune_backtest_threshold.py",
+        "Debug/MODEL_TRAINING_ARCHITECTURE.md",
         "Debug/PIPELINE_USAGE.md",
         "Backtest/config.py",
         "Backtest/engine.py",
         "Backtest/model_gate.py",
         "Backtest/reporter.py",
         "Backtest/examples/run_vectorbt_backtest.py",
+        "ml_layer/config.py",
+        "ml_layer/train_validator.py",
     ]
     return [project_root / rel for rel in rels]
 

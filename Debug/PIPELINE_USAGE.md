@@ -4,6 +4,20 @@
 
 本项目采用**单一启动脚本**设计：所有流程均通过 `Debug/run_pipeline.py` 启动和管理。
 
+### 0.0 运行环境约定（固定）
+
+- 统一使用已存在的 conda 环境：`chan`。
+- 默认前置动作：`conda activate chan`。
+- 后续运行命令按该环境直接执行，不再重复提示环境切换。
+- 文档阅读约定：除非命令里明确写了其他环境，本文档中的所有命令都默认在 conda 环境 `chan` 下执行。
+
+### 0.0.1 币种读取与内存策略（最新）
+
+- 运行脚本已改为每次从 `data/` 目录动态扫描全量 parquet 币种，不再固定历史 10 币种名单。
+- 训练/测试币种按动态全量币种执行 4:1 划分（80% 训练，20% 测试）。
+- 回测默认使用动态扫描到的全部币种。
+- 并发执行默认带内存预留策略（预留约 30% 可用内存给系统和其他任务），避免任务吃满内存。
+
 - 完整流程：`--mode full`（train -> predict -> backtest）
 - 快速迭代：`--mode predict-backtest`（复用模型）
 - 分阶段运行：`--stage train|predict|backtest`（独立运行单阶段）
@@ -35,6 +49,7 @@
 - 每次训练迭代都必须保留上一版完整 run 目录，不覆盖历史 run。
 - 每次训练输出都必须包含“当次架构说明快照”。
 - 当前代码已在训练流程自动生成：`MODEL_TRAINING_ARCHITECTURE_<timestamp>.md`。
+- 当前代码已在 `run_pipeline.py` 默认自动备份到 `backup/`（可用 `--no-backup-run` 关闭）。
 - 归档时建议保存至少以下内容：
   - `train/`（模型、meta、metrics、filter、label records、架构快照）
   - `logs/`
@@ -55,21 +70,21 @@
 
 ### 标准定义
 
-**"全流程"一般情况下是指：使用 `data/` 文件夹下的全量币种历史数据进行完整的训练 → 预测 → 回测流程。**
+**"全流程"一般情况下是指：使用 `data/` 文件夹下当前可用的全量币种历史数据进行完整的训练 → 预测 → 回测流程。**
 
 ### 数据来源
-- **使用目录**：`data/` 下的全量币种历史数据（共 10 个币种）
+- **使用目录**：`data/` 下的全量币种历史数据（币种数量随数据更新动态变化）
   - 数据存储格式：Parquet 文件（15分钟 K线合并自 5 分钟原始数据）
   - 数据时间范围：**动态生成**，基于各币种实际覆盖的时间区间
     - 全量覆盖范围：2020-01-01 ~ 2026-02-28（约 6.16 年）
     - 各币种起始时间不同（BTC/ETH 最早，SOL/AVAX 最晚）
-- **币种列表**（10 个）：`ADAUSDT`, `AVAXUSDT`, `BNBUSDT`, `BTCUSDT`, `DOGEUSDT`, `DOTUSDT`, `ETHUSDT`, `LTCUSDT`, `SOLUSDT`, `XRPUSDT`
+- **币种列表**：运行时从 `data/*.parquet` 动态扫描生成，不再写死固定名单。
 
 ### 训练与测试分割
 
 #### 币种分割（Symbol Split）：4:1 比例
-- **训练币种（8个）**：`ADAUSDT`, `AVAXUSDT`, `BNBUSDT`, `BTCUSDT`, `DOGEUSDT`, `DOTUSDT`, `ETHUSDT`, `LTCUSDT`
-- **测试币种（2个）**：`SOLUSDT`, `XRPUSDT`
+- **训练币种（80%）**：从 `data/` 动态扫描后的全量币种中按排序取前 80%
+- **测试币种（20%）**：从 `data/` 动态扫描后的全量币种中按排序取后 20%
 - **目的**：验证模型在未见币种上的泛化能力
 
 #### 时间分割（Time Split）：4:1 比例
@@ -92,8 +107,8 @@
 
 ### 回测配置
 
-#### 回测币种：全量 10 个币种
-- 使用上述全部 10 个币种进行回测
+#### 回测币种：data 目录动态全量币种
+- 使用 `data/` 动态扫描到的全部币种进行回测
 - **每个币种单独统计**收益、最大回撤、交易次数等指标
 - **聚合统计**：整体投资组合的表现
 
@@ -121,21 +136,160 @@ Debug/
       predict/
         shap_predict_report.html # 对选定币种的预测与 SHAP 解释
       backtest/
-        backtest_metrics.json    # 回测结果：10个币种逐个、聚合统计
+        backtest_metrics.json    # 回测结果：全量币种逐个、聚合统计
         model_signal_events.csv  # 信号事件（时间、币种、方向、概率）
         model_signal_bars.csv    # 信号 K线（时间、币种、OHLCV）
         xgb_backtest_report.html # 回测可视化报告（总体）
         xgb_backtest_report_detail.html  # 详细回测报告（可选）
       logs/
+        pipeline.log   # 流程总览日志（阶段开始/结束、关键耗时）
         train.log      # 训练过程日志
         predict.log    # 预测过程日志
         backtest.log   # 回测过程日志
       run_manifest.json          # 本次运行配置、命令、产物清单
+    latest_run.json              # 最近一次运行索引（含日志路径）
+    current_run.json             # 当前正在运行索引（运行结束会自动移除）
 ```
+
+日志统一约定：
+
+1. 全流程日志统一写入 `Debug/runs/<run_id>/logs/`，不再额外写到 `result/`。
+2. `pipeline.log` 用于快速判断阶段状态；各阶段详细输出分别在 `train.log` / `predict.log` / `backtest.log`。
+3. `Debug/runs/current_run.json` 指向当前运行日志；`Debug/runs/latest_run.json` 指向最近一次运行日志。
 
 ---
 
 ## 2. 快速开始
+
+### 2.0 后台运行约定（强制）
+
+全流程训练+回测耗时较长，统一使用后台运行，避免终端断开导致任务中断。
+
+1. 必须使用 `nohup` 启动，并重定向 stdout/stderr 到日志文件。
+2. 启动后记录 `run_id` 与进程 PID，便于追踪与停止。
+3. 关闭终端或 SSH 会话后，任务仍会继续执行。
+4. 每次启动新的 full 实验前，必须先停止并清理旧实验进程；`run_pipeline.py` 在 full 模式下默认会执行该动作（`--kill-existing-runs-before-start`）。
+
+示例（Linux）：
+
+```bash
+cd /root/code/chan.py
+RUN_ID="full_dynamic_bg_$(date +%Y%m%d_%H%M%S)"
+nohup conda run -n chan python Debug/run_pipeline.py \
+  --mode full \
+  --run-id "$RUN_ID" \
+  --kill-existing-runs-before-start \
+  --cache-mode resume \
+  --begin-time 2020-01-01 \
+  --end-time 2026-02-28 \
+  --train-mode gpu \
+  --num-workers 4 \
+  --feature-symbol-workers 4 \
+  --symbol-workers 8 \
+  --backtest-parallel-mode process \
+  --backtest-data-cache-size 8 \
+  > "Debug/runs/${RUN_ID}_launcher.log" 2>&1 &
+echo "run_id=$RUN_ID pid=$!"
+```
+
+状态检查：
+
+```bash
+ps -ef | grep -E "run_pipeline.py|xgboost_shap_train.py|run_vectorbt_backtest.py" | grep -v grep
+tail -f Debug/runs/<run_id>/logs/train.log
+tail -f Debug/runs/<run_id>/logs/backtest.log
+```
+
+补充：
+
+- 默认不建议关闭旧进程清理；仅在排障时使用 `--no-kill-existing-runs-before-start`。
+- `Debug/run_full_pipeline_bg.sh` 已默认包含 `--kill-existing-runs-before-start --cache-mode resume`。
+
+### 2.0.4 detached 复用回测（推荐）
+
+当你只想复用已有训练产物做一轮全量 backtest，并确保终端断开后继续运行时，使用以下命令：
+
+```bash
+cd /root/code/chan.py
+SOURCE_RUN_ID="exp_v1_resume_20260329_0ea492a7"
+RUN_ID="rebacktest_detached_$(date +%Y%m%d_%H%M%S)"
+nohup conda run -n chan python Debug/run_pipeline.py \
+  --mode predict-backtest \
+  --stage backtest \
+  --source-run-id "$SOURCE_RUN_ID" \
+  --run-id "$RUN_ID" \
+  --artifact-kind run \
+  --source-artifact-kind run \
+  --begin-time 2020-01-01 \
+  --end-time 2026-02-28 \
+  --symbol-workers 8 \
+  --backtest-parallel-mode process \
+  --backtest-data-cache-size 8 \
+  --event-cache \
+  --event-cache-namespace "$SOURCE_RUN_ID" \
+  --no-empty-signal-fallback \
+  --save-trades-csv \
+  --save-equity-csv \
+  --save-html-detail-report \
+  > "Debug/runs/${RUN_ID}_launcher.log" 2>&1 &
+echo "run_id=$RUN_ID pid=$! launcher_log=Debug/runs/${RUN_ID}_launcher.log"
+```
+
+状态检查：
+
+```bash
+ps -fp "$!"
+tail -f "Debug/runs/${RUN_ID}_launcher.log"
+tail -f "Debug/runs/${RUN_ID}/logs/backtest.log"
+```
+
+### 2.0.3 训练缓存续跑与全新重跑（新增）
+
+为避免长任务中断后重复计算，训练阶段新增统一缓存控制参数：
+
+- `--cache-mode resume|fresh`
+  - `resume`：续跑模式，优先复用已完成的标签/特征缓存（推荐默认）。
+  - `fresh`：全新模式，先清空对应命名空间并禁用缓存，强制全量重算。
+- `--cache-namespace <name>`：缓存命名空间，用于区分实验代际。
+- `--resume-from-run-id <run_id>`：在 `cache-mode=resume` 且未手动指定 `cache-namespace` 时，自动使用该 run_id 作为命名空间。
+
+推荐用法：
+
+1. 首次实验（建立可续跑缓存）
+
+```bash
+conda run -n chan python Debug/run_pipeline.py \
+  --mode full \
+  --run-id exp_v1_full_20260328 \
+  --cache-mode resume \
+  --cache-namespace exp_v1 \
+  --begin-time 2020-01-01 \
+  --end-time 2026-02-28
+```
+
+2. 中断后续跑（跳过已完成部分）
+
+```bash
+conda run -n chan python Debug/run_pipeline.py \
+  --mode full \
+  --run-id exp_v1_resume_20260329 \
+  --cache-mode resume \
+  --cache-namespace exp_v1 \
+  --begin-time 2020-01-01 \
+  --end-time 2026-02-28
+```
+
+3. 模型代际升级后全新重跑（不使用旧缓存）
+
+```bash
+conda run -n chan python Debug/run_pipeline.py \
+  --mode full \
+  --run-id exp_v2_fresh_20260401 \
+  --cache-mode fresh \
+  --cache-namespace exp_v2 \
+  --begin-time 2020-01-01 \
+  --end-time 2026-02-28
+```
 
 ### 2.0 回测框架迭代约定（重要）
 
@@ -154,6 +308,8 @@ Debug/
 1. 训练采样阶段默认按 CPU 核心数自动设置 `--num-workers`。
 2. 回测阶段默认按 CPU 核心数自动设置 `--symbol-workers`，并默认 `--backtest-parallel-mode process`。
 3. 当标的数量为 1 时，symbol 级并行不会带来加速，这属于预期行为。
+4. 回测新增有界缓存参数 `--backtest-data-cache-size`（默认 8，0 关闭），避免无限增长占用内存。
+5. 回测新增预加载参数 `--backtest-preload-bars`，在 `thread` 模式下可减少重复 I/O；`process` 模式通常建议关闭以控制内存。
 
 补充：
 - `ml_layer` 特征层内部也支持按 symbol 并发构建特征（`FeatureConfig.symbol_workers`）。
@@ -180,7 +336,7 @@ Debug/
 一条命令执行：训练 → 预测 → 回测
 
 ```powershell
-# 标准全流程：使用全量 6 年数据，训练测试 4:1 分割，8 币种训练 + 2 币种测试 + 10 币种回测
+# 标准全流程：使用全量 6 年数据，训练测试 4:1 分割，回测为 data 目录动态全量币种
 C:/Users/xueyu/anaconda3/envs/chan/python.exe Debug/run_pipeline.py \
   --mode full \
   --run-id my_baseline_v1 \
@@ -188,6 +344,9 @@ C:/Users/xueyu/anaconda3/envs/chan/python.exe Debug/run_pipeline.py \
   --end-time 2026-02-28 \
   --train-mode auto \
   --num-workers 4 \
+  --symbol-workers 8 \
+  --backtest-parallel-mode process \
+  --backtest-data-cache-size 8 \
   --labeling-strategy trainvalidator_hierarchical \
   --pt-multiplier 2.0 \
   --timeout-bars 20 \
@@ -244,6 +403,19 @@ C:/Users/xueyu/anaconda3/envs/chan/python.exe Debug/run_pipeline.py \
 
 用途：复用已有训练产物，按阈值网格自动跑回测并选出最优阈值。
 
+注意：
+
+- 该脚本会对每个阈值逐个（或并发）触发一轮 `predict-backtest`。
+- 日志中出现 `threshold=0.50` 跑完后继续 `threshold=0.55`，是网格迭代的正常行为，不是重复执行同一轮。
+
+当前采用统一综合目标函数 `v1_backtest_composite`：
+
+- 年化收益率上升（硬约束）
+- 最大回撤不恶化（硬约束）
+- Sharpe 不下降（硬约束）
+- 交易数保持在合理区间（硬约束）
+- 在满足硬约束后，按加权综合分数排序选择最优阈值
+
 ```powershell
 C:/Users/xueyu/anaconda3/envs/chan/python.exe Debug/tune_backtest_threshold.py \
   --source-run-id labeling_suite_full_baseline_original_20260322_212132 \
@@ -253,11 +425,124 @@ C:/Users/xueyu/anaconda3/envs/chan/python.exe Debug/tune_backtest_threshold.py \
   --threshold-start 0.45 \
   --threshold-stop 0.75 \
   --threshold-step 0.02 \
+  --max-concurrent-runs 2 \
+  --resume-existing \
+    --event-cache \
+    --event-cache-namespace labeling_suite_full_baseline_original_20260322_212132 \
+    --no-empty-signal-fallback \
+    --save-trades-csv \
+    --save-equity-csv \
   --signal-margin 0.02 \
   --cooldown-bars 4
 ```
 
+并发与性能建议：
+
+- `--max-concurrent-runs`：并发启动多个阈值子任务（多实例）。
+- `--symbol-workers`：单个子任务内部的 symbol 并行度。
+- 推荐先从 `max-concurrent-runs=2` 开始，避免与 `symbol-workers` 叠加导致资源争用。
+- `--resume-existing`：中断后续跑时跳过已有 `backtest_metrics.json` 的子任务。
+
 输出：`Debug/runs/threshold_tune_<timestamp>_summary.json`
+
+结果中会新增：
+
+- `objective_config`（本次权重与约束）
+- `baseline_aggregate`（基线回测指标）
+- `passed_count`（满足硬约束的阈值个数）
+- 每个阈值下的 `objective` 详情（组件分数、约束通过情况）
+
+### 2.2.2 双模型问题诊断与优化迭代（新增）
+
+每次迭代建议先复用当前基线 run 的训练诊断结果，先定位问题再调参。
+
+步骤：
+
+1. 统一备份当前代码到 `backup/`（`run_pipeline.py` 默认开启 `--backup-run`）。
+2. 运行双模型问题分析脚本，生成本轮聚焦问题清单。
+
+```powershell
+C:/Users/xueyu/anaconda3/envs/chan/python.exe Debug/analyze_dual_model_issues.py \
+  --run-id full_allparts_20260327_1
+```
+
+输出：`Debug/runs/<run_id>/train/dual_model_issue_focus.json`
+
+脚本会优先检查：
+
+- Primary：方向偏置、`bsp_type` 拖后腿、置信度分桶收益是否反转、月度稳定性。
+- Meta：阈值敏感性、Brier/LogLoss 校准质量、误杀/漏放占比、特征依赖集中度。
+
+随后可直接在 `run_pipeline.py` 使用新参数开展迭代：
+
+```powershell
+C:/Users/xueyu/anaconda3/envs/chan/python.exe Debug/run_pipeline.py \
+  --mode full \
+  --run-id iter_dynamic_pt_calibrated \
+  --begin-time 2020-01-01 \
+  --end-time 2026-02-28 \
+  --dynamic-pt-enabled \
+  --pt-low-vol-multiplier 1.8 \
+  --pt-mid-vol-multiplier 2.0 \
+  --pt-high-vol-multiplier 2.3 \
+  --meta-calibration isotonic \
+  --pass-positive-month-ratio 0.70
+```
+
+若在回测阶段需要分组阈值（按方向/BSP）：
+
+```powershell
+C:/Users/xueyu/anaconda3/envs/chan/python.exe Debug/run_pipeline.py \
+  --mode predict-backtest \
+  --source-run-id iter_dynamic_pt_calibrated \
+  --run-id iter_group_thresholds \
+  --meta-threshold-by-direction '{"buy":0.55,"sell":0.60}' \
+  --meta-threshold-by-bsp '{"1":0.53,"3":0.62,"sell_3":0.65}' \
+  --backtest-fee 0.0004 \
+  --backtest-slippage 0.0001
+```
+
+### 2.2.3 校准 + 阈值分层 + 回测对比一键联动（新增）
+
+脚本：`Debug/run_meta_calibration_threshold_suite.py`
+
+用途：
+
+1. 对 `none/platt/isotonic` 分别训练（或复用指定 run）。
+2. 对每个校准方案执行 BSP/方向阈值候选组合搜索（每组再做 signal-threshold 网格）。
+3. 自动汇总每个校准方案的最优结果，并输出对比 `JSON + Markdown` 报告。
+
+示例：
+
+```bash
+cd /root/code/chan.py
+/root/anaconda3/envs/chan/bin/python Debug/run_meta_calibration_threshold_suite.py \
+  --begin-time 2020-01-01 \
+  --end-time 2026-02-28 \
+  --baseline-run-id exp_v1_resume_20260329_0ea492a7 \
+  --include-none-calibration \
+  --calibrations platt isotonic \
+  --threshold-start 0.50 \
+  --threshold-stop 0.60 \
+  --threshold-step 0.02 \
+  --max-concurrent-runs 2 \
+  --symbol-workers 8 \
+  --backtest-parallel-mode process \
+  --event-cache \
+  --event-cache-namespace exp_v1_resume_20260329_0ea492a7 \
+  --no-empty-signal-fallback \
+  --save-trades-csv \
+  --save-equity-csv \
+  --bsp-threshold-candidate "" \
+  --bsp-threshold-candidate "3=0.62,sell_3=0.65" \
+  --direction-threshold-candidate "" \
+  --direction-threshold-candidate "buy=0.55,sell=0.60"
+```
+
+输出：
+
+- `Debug/runs/meta_calibration_suite_<timestamp>/suite_comparison.json`
+- `Debug/runs/meta_calibration_suite_<timestamp>/suite_comparison.md`
 
 ---
 
@@ -335,17 +620,28 @@ C:/Users/xueyu/anaconda3/envs/chan/python.exe Debug/run_pipeline.py \
 | `--train-symbols` | 8 个币种 | 用于训练的币种列表 |
 | `--test-symbols` | `SOLUSDT XRPUSDT` | 用于验证的币种列表（不参与训练）|
 | `--train-mode` | `auto` | 训练设备：`cpu` / `gpu` / `auto` |
+| `--train-mode gpu` | - | 强制GPU训练路径：优先 `tree_method=gpu_hist`，若当前XGBoost版本不支持则回退 `hist + device=cuda` |
 | `--num-workers` | 自动（按CPU核数） | 数据采样的并行进程数 |
 | `--feature-symbol-workers` | 自动（约为num-workers一半） | L3特征层按symbol并发构建线程数 |
 | `--labeling-strategy` | `trainvalidator_hierarchical` | TrainValidator 分层策略 |
 | `--labeling-strategy` | `trainvalidator_hierarchical` | TrainValidator 分层训练策略 |
 | `--pt-multiplier` | `2.0` | 止盈障碍倍数（RR） |
+| `--dynamic-pt-enabled` | False | 启用按波动状态动态调整 PT 倍数 |
+| `--pt-low-vol-multiplier` | `1.8` | 低波动状态 PT 倍数 |
+| `--pt-mid-vol-multiplier` | `2.0` | 中波动状态 PT 倍数 |
+| `--pt-high-vol-multiplier` | `2.2` | 高波动状态 PT 倍数 |
+| `--pt-vol-window` | `96` | 波动状态滚动窗口（bar） |
+| `--pt-vol-quantile-low` | `0.33` | 低波动分位点 |
+| `--pt-vol-quantile-high` | `0.67` | 高波动分位点 |
 | `--timeout-bars` | `20` | 默认时间障碍bar数 |
 | `--weak-timeout-bars` | `10` | 弱信号时间障碍bar数 |
 | `--weak-bsp-types` | `3` | 弱信号主类型（逗号分隔） |
 | `--cv-splits` | `5` | PurgedKFold 折数 |
 | `--embargo-bars` | `10` | 时间隔离带 bar 数 |
 | `--meta-threshold` | `0.55` | Meta执行阈值 |
+| `--meta-calibration` | `none` | Meta 概率校准方法：`none/platt/isotonic` |
+| `--meta-calibration-ratio` | `0.2` | 校准集占比（时间后段） |
+| `--pass-positive-month-ratio` | `0.70` | 准入约束：月度正收益占比下限 |
 | `--primary-model` | `xgboost` | Primary模型类型 |
 | `--meta-model` | `logistic` | Meta模型类型 |
 | `--optuna-trials` | `0` | 超参搜索次数（0关闭） |
@@ -365,9 +661,20 @@ C:/Users/xueyu/anaconda3/envs/chan/python.exe Debug/run_pipeline.py \
 |------|--------|------|
 | `--backtest-symbols` | 全 10 个币种 | 回测的币种列表 |
 | `--symbol-workers` | 自动（按CPU核数） | 回测时币种级并行 worker 数 |
+| `--event-cache` | True | 是否启用回测事件缓存（可用 `--no-event-cache` 关闭） |
+| `--event-cache-dir` | `data/cache/backtest_events` | 回测事件缓存目录 |
+| `--event-cache-namespace` | `default` | 事件缓存命名空间 |
 | `--signal-margin` | `0.0` | 信号边际，抬高触发阈值 |
+| `--meta-threshold-by-direction` | 空 | 方向阈值 JSON 映射（buy/sell） |
+| `--meta-threshold-by-bsp` | 空 | BSP 阈值 JSON 映射（含 buy_1/sell_3 组合键） |
 | `--cooldown-bars` | `0` | 执行后冷却 bar 数 |
+| `--empty-signal-fallback` | False | 某标的无任何放行信号时，是否启用补单策略 |
+| `--empty-signal-target-rate` | `0.05` | 补单目标比例（仅 fallback 开启时生效） |
+| `--backtest-fee` | `0.0004` | 回测手续费 |
+| `--backtest-slippage` | `0.0001` | 回测滑点 |
 | `--save-html-detail-report` | False | 是否生成详细 HTML 报告 |
+| `--save-trades-csv` | True | 是否导出 `executed_trades.csv` |
+| `--save-equity-csv` | True | 是否导出 `portfolio_equity_curve.csv` |
 
 ### 复用参数（仅在 `mode=predict-backtest` 时使用）
 
