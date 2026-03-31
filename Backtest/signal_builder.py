@@ -1,24 +1,11 @@
 from __future__ import annotations
 
-from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import List
 
+import numpy as np
 import pandas as pd
 
 from .types import ScoredSignalEvent, SignalMatrix
-
-
-def _resolve_target_loc(index: pd.DatetimeIndex, ts: pd.Timestamp, execution_mode: str) -> Optional[int]:
-    loc = int(index.searchsorted(ts, side="left"))
-    if loc >= len(index):
-        return None
-
-    if execution_mode == "next_bar_open":
-        loc += 1
-        if loc >= len(index):
-            return None
-
-    return loc
 
 
 def build_signal_matrix(
@@ -32,92 +19,155 @@ def build_signal_matrix(
     if conflict_policy != "exit_first":
         raise ValueError("Only conflict_policy=exit_first is supported")
 
-    long_entries = pd.Series(False, index=bars_index)
-    long_exits = pd.Series(False, index=bars_index)
-    short_entries = pd.Series(False, index=bars_index)
-    short_exits = pd.Series(False, index=bars_index)
-    signal = pd.Series(0, index=bars_index, dtype="int32")
-    position = pd.Series(0, index=bars_index, dtype="int32")
+    n = len(bars_index)
+    long_entries_arr = np.zeros(n, dtype=bool)
+    long_exits_arr = np.zeros(n, dtype=bool)
+    short_entries_arr = np.zeros(n, dtype=bool)
+    short_exits_arr = np.zeros(n, dtype=bool)
+    signal_arr = np.zeros(n, dtype=np.int32)
+    position_arr = np.zeros(n, dtype=np.int32)
 
-    by_loc: Dict[int, List[ScoredSignalEvent]] = defaultdict(list)
+    has_buy = np.zeros(n, dtype=bool)
+    has_sell = np.zeros(n, dtype=bool)
     execution_pairs = []
 
-    for event in scored_events:
-        if event.signal == 0:
-            continue
-        loc = _resolve_target_loc(bars_index, event.exec_time, execution_mode)
-        if loc is None:
-            continue
-        by_loc[loc].append(event)
-        execution_pairs.append((event.exec_time, bars_index[loc]))
+    active_events = [event for event in scored_events if event.signal != 0]
+    if not active_events:
+        long_entries = pd.Series(long_entries_arr, index=bars_index)
+        long_exits = pd.Series(long_exits_arr, index=bars_index)
+        short_entries = pd.Series(short_entries_arr, index=bars_index)
+        short_exits = pd.Series(short_exits_arr, index=bars_index)
+        signal = pd.Series(signal_arr, index=bars_index, dtype="int32")
+        position = pd.Series(position_arr, index=bars_index, dtype="int32")
+        return SignalMatrix(
+            long_entries=long_entries,
+            long_exits=long_exits,
+            short_entries=short_entries,
+            short_exits=short_exits,
+            signal=signal,
+            position=position,
+            execution_pairs=execution_pairs,
+        )
+
+    index_ns = bars_index.view("int64")
+    event_times_ns = np.fromiter(
+        (int(pd.Timestamp(event.exec_time).value) for event in active_events),
+        dtype=np.int64,
+        count=len(active_events),
+    )
+    locs = np.searchsorted(index_ns, event_times_ns, side="left")
+    if execution_mode == "next_bar_open":
+        locs = locs + 1
+
+    valid_mask = (locs >= 0) & (locs < n)
+    if np.any(valid_mask):
+        valid_locs = locs[valid_mask].astype(np.intp, copy=False)
+        valid_signals = np.fromiter(
+            (event.signal for event, is_valid in zip(active_events, valid_mask) if bool(is_valid)),
+            dtype=np.int8,
+            count=int(valid_mask.sum()),
+        )
+        if np.any(valid_signals == 1):
+            np.logical_or.at(has_buy, valid_locs[valid_signals == 1], True)
+        if np.any(valid_signals == -1):
+            np.logical_or.at(has_sell, valid_locs[valid_signals == -1], True)
+
+    execution_pairs = [
+        (event.exec_time, bars_index[int(loc)])
+        for event, loc, is_valid in zip(active_events, locs, valid_mask)
+        if bool(is_valid)
+    ]
+
+    if not has_buy.any() and not has_sell.any():
+        long_entries = pd.Series(long_entries_arr, index=bars_index)
+        long_exits = pd.Series(long_exits_arr, index=bars_index)
+        short_entries = pd.Series(short_entries_arr, index=bars_index)
+        short_exits = pd.Series(short_exits_arr, index=bars_index)
+        signal = pd.Series(signal_arr, index=bars_index, dtype="int32")
+        position = pd.Series(position_arr, index=bars_index, dtype="int32")
+        return SignalMatrix(
+            long_entries=long_entries,
+            long_exits=long_exits,
+            short_entries=short_entries,
+            short_exits=short_exits,
+            signal=signal,
+            position=position,
+            execution_pairs=execution_pairs,
+        )
 
     current_pos = 0
     cooldown_remaining = 0
-    for i, ts in enumerate(bars_index):
-        events = by_loc.get(i, [])
+    for i in range(n):
 
         if cooldown_remaining > 0:
-            position.iat[i] = current_pos
-            signal.iat[i] = 0
+            position_arr[i] = current_pos
+            signal_arr[i] = 0
             cooldown_remaining -= 1
             continue
 
-        has_buy = any(ev.signal == 1 for ev in events)
-        has_sell = any(ev.signal == -1 for ev in events)
+        buy_at_i = bool(has_buy[i])
+        sell_at_i = bool(has_sell[i])
 
         action = 0
 
         if not allow_short:
-            if has_buy and has_sell:
+            if buy_at_i and sell_at_i:
                 if current_pos == 1:
-                    long_exits.iat[i] = True
+                    long_exits_arr[i] = True
                     current_pos = 0
                     action = -1
                 elif current_pos == 0:
-                    long_entries.iat[i] = True
+                    long_entries_arr[i] = True
                     current_pos = 1
                     action = 1
-            elif has_sell and current_pos == 1:
-                long_exits.iat[i] = True
+            elif sell_at_i and current_pos == 1:
+                long_exits_arr[i] = True
                 current_pos = 0
                 action = -1
-            elif has_buy and current_pos == 0:
-                long_entries.iat[i] = True
+            elif buy_at_i and current_pos == 0:
+                long_entries_arr[i] = True
                 current_pos = 1
                 action = 1
         else:
-            if has_buy and has_sell:
+            if buy_at_i and sell_at_i:
                 if current_pos == 1:
-                    long_exits.iat[i] = True
+                    long_exits_arr[i] = True
                     current_pos = 0
                     action = -1
                 elif current_pos == -1:
-                    short_exits.iat[i] = True
+                    short_exits_arr[i] = True
                     current_pos = 0
                     action = 1
-            elif has_buy:
+            elif buy_at_i:
                 if current_pos == -1:
-                    short_exits.iat[i] = True
+                    short_exits_arr[i] = True
                     current_pos = 0
                     action = 1
                 if current_pos == 0:
-                    long_entries.iat[i] = True
+                    long_entries_arr[i] = True
                     current_pos = 1
                     action = 1
-            elif has_sell:
+            elif sell_at_i:
                 if current_pos == 1:
-                    long_exits.iat[i] = True
+                    long_exits_arr[i] = True
                     current_pos = 0
                     action = -1
                 if current_pos == 0:
-                    short_entries.iat[i] = True
+                    short_entries_arr[i] = True
                     current_pos = -1
                     action = -1
 
-        signal.iat[i] = action
-        position.iat[i] = current_pos
+        signal_arr[i] = action
+        position_arr[i] = current_pos
         if action != 0 and cooldown_bars > 0:
             cooldown_remaining = cooldown_bars
+
+    long_entries = pd.Series(long_entries_arr, index=bars_index)
+    long_exits = pd.Series(long_exits_arr, index=bars_index)
+    short_entries = pd.Series(short_entries_arr, index=bars_index)
+    short_exits = pd.Series(short_exits_arr, index=bars_index)
+    signal = pd.Series(signal_arr, index=bars_index, dtype="int32")
+    position = pd.Series(position_arr, index=bars_index, dtype="int32")
 
     return SignalMatrix(
         long_entries=long_entries,

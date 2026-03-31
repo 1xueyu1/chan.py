@@ -22,29 +22,58 @@ def run_vectorbt_for_symbol(
     bars: pd.DataFrame,
     signal_matrix: SignalMatrix,
 ):
+    price = bars["open"] if config.execution_mode == "next_bar_open" else bars["close"]
+
+    has_any_signal = bool(signal_matrix.long_entries.any()) or bool(signal_matrix.long_exits.any())
+    if config.allow_short:
+        has_any_signal = (
+            has_any_signal
+            or bool(signal_matrix.short_entries.any())
+            or bool(signal_matrix.short_exits.any())
+        )
+
+    # Fast path: skip vectorbt portfolio construction when there is no effective signal.
+    if not has_any_signal:
+        if len(price.index) > 0:
+            equity_curve = pd.Series(float(config.initial_cash), index=price.index, dtype="float64")
+            drawdown_curve = pd.Series(0.0, index=price.index, dtype="float64")
+        else:
+            empty_index = pd.DatetimeIndex([], name="time")
+            equity_curve = pd.Series(dtype="float64", index=empty_index)
+            drawdown_curve = pd.Series(dtype="float64", index=empty_index)
+
+        metrics = metrics_from_equity_curve(equity_curve, config.initial_cash)
+        metrics.update(
+            {
+                "win_rate_pct": 0.0,
+                "profit_factor": 0.0,
+                "total_trades": 0,
+                "avg_trade_return_pct": 0.0,
+                "exposure_time_pct": 0.0,
+            }
+        )
+        return None, metrics, equity_curve, drawdown_curve, []
+
     try:
         import vectorbt as vbt
     except ImportError as exc:
         raise ImportError("vectorbt is required. Install it with: pip install vectorbt") from exc
 
-    price = bars["open"] if config.execution_mode == "next_bar_open" else bars["close"]
-
-    freq = pd.infer_freq(price.index)
-    # Fallback when index has gaps and infer_freq returns None.
+    freq_map = {
+        KL_TYPE.K_1M: "1min",
+        KL_TYPE.K_3M: "3min",
+        KL_TYPE.K_5M: "5min",
+        KL_TYPE.K_10M: "10min",
+        KL_TYPE.K_15M: "15min",
+        KL_TYPE.K_30M: "30min",
+        KL_TYPE.K_60M: "1h",
+        KL_TYPE.K_DAY: "1d",
+        KL_TYPE.K_WEEK: "1w",
+        KL_TYPE.K_MON: "1mo",
+    }
+    freq = freq_map.get(config.kl_type)
     if freq is None:
-        freq_map = {
-            KL_TYPE.K_1M: "1min",
-            KL_TYPE.K_3M: "3min",
-            KL_TYPE.K_5M: "5min",
-            KL_TYPE.K_10M: "10min",
-            KL_TYPE.K_15M: "15min",
-            KL_TYPE.K_30M: "30min",
-            KL_TYPE.K_60M: "1h",
-            KL_TYPE.K_DAY: "1d",
-            KL_TYPE.K_WEEK: "1w",
-            KL_TYPE.K_MON: "1mo",
-        }
-        freq = freq_map.get(config.kl_type, "15min")
+        freq = pd.infer_freq(price.index) or "15min"
 
     kwargs = dict(
         close=price,

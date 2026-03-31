@@ -5,11 +5,38 @@ import pickle
 from pathlib import Path
 from typing import Dict, List, Sequence
 
+import math
 import numpy as np
 import xgboost as xgb
 
 from .config import BacktestConfig
 from .types import RawBSPEvent, ScoredSignalEvent
+
+
+_GATE_CACHE: Dict[tuple, "DualModelGate"] = {}
+
+
+def _gate_cache_key(config: BacktestConfig) -> tuple:
+    return (
+        str(config.model_buy_path),
+        str(config.model_sell_path),
+        str(config.meta_buy_path),
+        str(config.meta_sell_path),
+        str(getattr(config, "meta_model_path", "") or ""),
+        float(config.signal_threshold),
+        float(config.signal_margin),
+        tuple(sorted((getattr(config, "meta_threshold_by_direction", {}) or {}).items())),
+        tuple(sorted((getattr(config, "meta_threshold_by_bsp", {}) or {}).items())),
+    )
+
+
+def get_dual_model_gate(config: BacktestConfig) -> "DualModelGate":
+    key = _gate_cache_key(config)
+    gate = _GATE_CACHE.get(key)
+    if gate is None:
+        gate = DualModelGate(config)
+        _GATE_CACHE[key] = gate
+    return gate
 
 
 class DualModelGate:
@@ -41,6 +68,7 @@ class DualModelGate:
             if p.exists():
                 with open(p, "rb") as f:
                     self.meta_model = pickle.load(f)
+        self.has_meta_model = self.meta_model is not None
 
         with open(config.meta_buy_path, "r", encoding="utf-8") as f:
             self.meta_buy: Dict[str, int] = json.load(f)
@@ -55,83 +83,62 @@ class DualModelGate:
         for name, idx in self.meta_sell.items():
             self.fnames_sell[idx] = name
 
+        self._base_threshold = float(self.config.signal_threshold + self.config.signal_margin)
+        self._threshold_by_direction: Dict[str, float] = {}
+        self._threshold_by_bsp: Dict[str, float] = {}
+        self._threshold_by_combo: Dict[str, float] = {}
+
+        for key, value in (getattr(self.config, "meta_threshold_by_direction", {}) or {}).items():
+            k = str(key).strip().lower()
+            if k in {"buy", "sell"}:
+                self._threshold_by_direction[k] = float(value)
+
+        for key, value in (getattr(self.config, "meta_threshold_by_bsp", {}) or {}).items():
+            k = str(key).strip().lower()
+            if not k:
+                continue
+            if "_" in k:
+                self._threshold_by_combo[k] = float(value)
+            else:
+                self._threshold_by_bsp[k] = float(value)
+
+    @staticmethod
+    def _clip_threshold(value: float) -> float:
+        return float(max(0.0, min(1.0, value)))
+
+    def _event_threshold(
+        self,
+        event: RawBSPEvent,
+        direction: int,
+    ) -> float:
+        threshold = self._base_threshold
+        if direction == 0:
+            return self._clip_threshold(threshold)
+
+        dir_key = "buy" if int(direction) > 0 else "sell"
+
+        if dir_key in self._threshold_by_direction:
+            threshold = self._threshold_by_direction[dir_key]
+
+        bsp_key = str(getattr(event, "bsp_type", "")).lower()
+        combo_key = f"{dir_key}_{bsp_key}"
+        if bsp_key in self._threshold_by_bsp:
+            threshold = self._threshold_by_bsp[bsp_key]
+        if combo_key in self._threshold_by_combo:
+            threshold = self._threshold_by_combo[combo_key]
+
+        return self._clip_threshold(threshold)
+
     def _vectorize(
         self,
         event: RawBSPEvent,
         is_buy: bool,
     ) -> tuple[np.ndarray, Dict[str, int], List[str]]:
         meta = self.meta_buy if is_buy else self.meta_sell
-        fnames = self.fnames_buy if is_buy else self.fnames_sell
-
-        arr = np.zeros(len(meta), dtype=np.float32)
-
-        if "bsp_type_1" in meta:
-            arr[meta["bsp_type_1"]] = 1.0 if event.bsp_type == "1" else 0.0
-        if "bsp_type_2" in meta:
-            arr[meta["bsp_type_2"]] = 1.0 if event.bsp_type == "2" else 0.0
-        if "bsp_type_3" in meta:
-            arr[meta["bsp_type_3"]] = 1.0 if event.bsp_type == "3" else 0.0
-        if "is_buy_signal" in meta:
-            arr[meta["is_buy_signal"]] = 1.0 if bool(event.is_buy) else 0.0
-        if "bsp_type_1b" in meta:
-            arr[meta["bsp_type_1b"]] = (
-                1.0
-                if bool(event.is_buy) and event.bsp_type == "1"
-                else 0.0
-            )
-        if "bsp_type_2b" in meta:
-            arr[meta["bsp_type_2b"]] = (
-                1.0
-                if bool(event.is_buy) and event.bsp_type == "2"
-                else 0.0
-            )
-        if "bsp_type_3b" in meta:
-            arr[meta["bsp_type_3b"]] = (
-                1.0
-                if bool(event.is_buy) and event.bsp_type == "3"
-                else 0.0
-            )
-        if "bsp_type_1s" in meta:
-            arr[meta["bsp_type_1s"]] = (
-                1.0
-                if (not bool(event.is_buy)) and event.bsp_type == "1"
-                else 0.0
-            )
-        if "bsp_type_2s" in meta:
-            arr[meta["bsp_type_2s"]] = (
-                1.0
-                if (not bool(event.is_buy)) and event.bsp_type == "2"
-                else 0.0
-            )
-        if "bsp_type_3s" in meta:
-            arr[meta["bsp_type_3s"]] = (
-                1.0
-                if (not bool(event.is_buy)) and event.bsp_type == "3"
-                else 0.0
-            )
-
-        for feat_name, feat_value in event.feature_map.items():
-            if feat_name in meta:
-                arr[meta[feat_name]] = (
-                    0.0 if not np.isfinite(feat_value) else float(feat_value)
-                )
-
-        # Compatible aliases across older/newer feature naming.
-        if (
-            "dist_to_zs_center" in meta
-            and "distance_to_zhongshu_center" in event.feature_map
-        ):
-            val = float(
-                event.feature_map.get("distance_to_zhongshu_center", 0.0)
-            )
-            arr[meta["dist_to_zs_center"]] = (
-                0.0 if not np.isfinite(val) else val
-            )
-        if "bi_count_in_zs" in meta and "zs_bi_count" in event.feature_map:
-            val = float(event.feature_map.get("zs_bi_count", 0.0))
-            arr[meta["bi_count_in_zs"]] = 0.0 if not np.isfinite(val) else val
-
-        return arr, meta, fnames
+        matrix, fnames = self._vectorize_batch([event], is_buy)
+        if matrix.shape[0] == 0:
+            return np.zeros(len(meta), dtype=np.float32), meta, fnames
+        return matrix[0], meta, fnames
 
     def _vectorize_batch(
         self,
@@ -144,117 +151,93 @@ class DualModelGate:
         if not events:
             return np.empty((0, len(meta)), dtype=np.float32), fnames
 
-        matrix = np.zeros((len(events), len(meta)), dtype=np.float32)
+        n_rows = len(events)
+        matrix = np.zeros((n_rows, len(meta)), dtype=np.float32)
 
-        if "bsp_type_1" in meta:
-            idx = meta["bsp_type_1"]
-            for row_idx, ev in enumerate(events):
-                matrix[row_idx, idx] = 1.0 if ev.bsp_type == "1" else 0.0
-        if "bsp_type_2" in meta:
-            idx = meta["bsp_type_2"]
-            for row_idx, ev in enumerate(events):
-                matrix[row_idx, idx] = 1.0 if ev.bsp_type == "2" else 0.0
-        if "bsp_type_3" in meta:
-            idx = meta["bsp_type_3"]
-            for row_idx, ev in enumerate(events):
-                matrix[row_idx, idx] = 1.0 if ev.bsp_type == "3" else 0.0
-        if "is_buy_signal" in meta:
-            idx = meta["is_buy_signal"]
-            for row_idx, ev in enumerate(events):
-                matrix[row_idx, idx] = 1.0 if bool(ev.is_buy) else 0.0
-        if "bsp_type_1b" in meta:
-            idx = meta["bsp_type_1b"]
-            for row_idx, ev in enumerate(events):
-                matrix[row_idx, idx] = (
-                    1.0
-                    if bool(ev.is_buy) and ev.bsp_type == "1"
-                    else 0.0
-                )
-        if "bsp_type_2b" in meta:
-            idx = meta["bsp_type_2b"]
-            for row_idx, ev in enumerate(events):
-                matrix[row_idx, idx] = (
-                    1.0
-                    if bool(ev.is_buy) and ev.bsp_type == "2"
-                    else 0.0
-                )
-        if "bsp_type_3b" in meta:
-            idx = meta["bsp_type_3b"]
-            for row_idx, ev in enumerate(events):
-                matrix[row_idx, idx] = (
-                    1.0
-                    if bool(ev.is_buy) and ev.bsp_type == "3"
-                    else 0.0
-                )
-        if "bsp_type_1s" in meta:
-            idx = meta["bsp_type_1s"]
-            for row_idx, ev in enumerate(events):
-                matrix[row_idx, idx] = (
-                    1.0
-                    if (not bool(ev.is_buy)) and ev.bsp_type == "1"
-                    else 0.0
-                )
-        if "bsp_type_2s" in meta:
-            idx = meta["bsp_type_2s"]
-            for row_idx, ev in enumerate(events):
-                matrix[row_idx, idx] = (
-                    1.0
-                    if (not bool(ev.is_buy)) and ev.bsp_type == "2"
-                    else 0.0
-                )
-        if "bsp_type_3s" in meta:
-            idx = meta["bsp_type_3s"]
-            for row_idx, ev in enumerate(events):
-                matrix[row_idx, idx] = (
-                    1.0
-                    if (not bool(ev.is_buy)) and ev.bsp_type == "3"
-                    else 0.0
-                )
+        bsp_types = [str(ev.bsp_type) for ev in events]
+        is_buy_flags = np.fromiter((1.0 if bool(ev.is_buy) else 0.0 for ev in events), dtype=np.float32, count=n_rows)
+        is_sell_flags = 1.0 - is_buy_flags
+
+        idx = meta.get("bsp_type_1")
+        if idx is not None:
+            matrix[:, idx] = np.fromiter((1.0 if t == "1" else 0.0 for t in bsp_types), dtype=np.float32, count=n_rows)
+        idx = meta.get("bsp_type_2")
+        if idx is not None:
+            matrix[:, idx] = np.fromiter((1.0 if t == "2" else 0.0 for t in bsp_types), dtype=np.float32, count=n_rows)
+        idx = meta.get("bsp_type_3")
+        if idx is not None:
+            matrix[:, idx] = np.fromiter((1.0 if t == "3" else 0.0 for t in bsp_types), dtype=np.float32, count=n_rows)
+
+        idx = meta.get("is_buy_signal")
+        if idx is not None:
+            matrix[:, idx] = is_buy_flags
+
+        idx_1 = np.fromiter((1.0 if t == "1" else 0.0 for t in bsp_types), dtype=np.float32, count=n_rows)
+        idx_2 = np.fromiter((1.0 if t == "2" else 0.0 for t in bsp_types), dtype=np.float32, count=n_rows)
+        idx_3 = np.fromiter((1.0 if t == "3" else 0.0 for t in bsp_types), dtype=np.float32, count=n_rows)
+
+        idx = meta.get("bsp_type_1b")
+        if idx is not None:
+            matrix[:, idx] = is_buy_flags * idx_1
+        idx = meta.get("bsp_type_2b")
+        if idx is not None:
+            matrix[:, idx] = is_buy_flags * idx_2
+        idx = meta.get("bsp_type_3b")
+        if idx is not None:
+            matrix[:, idx] = is_buy_flags * idx_3
+
+        idx = meta.get("bsp_type_1s")
+        if idx is not None:
+            matrix[:, idx] = is_sell_flags * idx_1
+        idx = meta.get("bsp_type_2s")
+        if idx is not None:
+            matrix[:, idx] = is_sell_flags * idx_2
+        idx = meta.get("bsp_type_3s")
+        if idx is not None:
+            matrix[:, idx] = is_sell_flags * idx_3
+
+        meta_get = meta.get
+        alias_dist_idx = meta_get("dist_to_zs_center")
+        alias_bi_idx = meta_get("bi_count_in_zs")
 
         for row_idx, ev in enumerate(events):
-            for feat_name, feat_value in ev.feature_map.items():
-                col_idx = meta.get(feat_name)
-                if col_idx is not None:
-                    matrix[row_idx, col_idx] = (
-                        0.0
-                        if not np.isfinite(feat_value)
-                        else float(feat_value)
-                    )
+            feature_map = ev.feature_map
+            for feat_name, feat_value in feature_map.items():
+                col_idx = meta_get(feat_name)
+                if col_idx is None:
+                    continue
+                fv = float(feat_value)
+                matrix[row_idx, col_idx] = fv if np.isfinite(fv) else 0.0
 
-            if (
-                "dist_to_zs_center" in meta
-                and "distance_to_zhongshu_center" in ev.feature_map
-            ):
-                val = float(
-                    ev.feature_map.get("distance_to_zhongshu_center", 0.0)
-                )
-                matrix[row_idx, meta["dist_to_zs_center"]] = (
-                    0.0 if not np.isfinite(val) else val
-                )
-            if "bi_count_in_zs" in meta and "zs_bi_count" in ev.feature_map:
-                val = float(ev.feature_map.get("zs_bi_count", 0.0))
-                matrix[row_idx, meta["bi_count_in_zs"]] = (
-                    0.0 if not np.isfinite(val) else val
-                )
+            if alias_dist_idx is not None and "distance_to_zhongshu_center" in feature_map:
+                val = float(feature_map.get("distance_to_zhongshu_center", 0.0))
+                matrix[row_idx, alias_dist_idx] = val if np.isfinite(val) else 0.0
+            if alias_bi_idx is not None and "zs_bi_count" in feature_map:
+                val = float(feature_map.get("zs_bi_count", 0.0))
+                matrix[row_idx, alias_bi_idx] = val if np.isfinite(val) else 0.0
 
         return matrix, fnames
 
-    def _predict_batch(
+    def _predict_from_matrix(
         self,
-        events: Sequence[RawBSPEvent],
+        matrix: np.ndarray,
+        fnames: List[str],
         is_buy: bool,
     ) -> np.ndarray:
-        if not events:
-            return np.empty((0,), dtype=np.float32)
+        if matrix.shape[0] == 0:
+            return np.empty((0, 3), dtype=np.float32)
 
-        matrix, fnames = self._vectorize_batch(events, is_buy)
-        dmat = xgb.DMatrix(
-            matrix,
-            feature_names=fnames,
-            missing=np.nan,
-        )
         model = self.model_buy if is_buy else self.model_sell
-        probs = model.predict(dmat)
+        try:
+            # Avoid DMatrix construction overhead on hot path.
+            probs = model.inplace_predict(matrix)
+        except Exception:
+            dmat = xgb.DMatrix(
+                matrix,
+                feature_names=fnames,
+                missing=np.nan,
+            )
+            probs = model.predict(dmat)
         arr = np.asarray(probs)
         if arr.ndim == 1:
             # Binary fallback: convert to 3-class compatible matrix.
@@ -264,6 +247,17 @@ class DualModelGate:
             return np.stack([arr[:, 0], np.zeros(arr.shape[0], dtype=arr.dtype), arr[:, 1]], axis=1)
         return arr
 
+    def _predict_batch(
+        self,
+        events: Sequence[RawBSPEvent],
+        is_buy: bool,
+    ) -> np.ndarray:
+        if not events:
+            return np.empty((0, 3), dtype=np.float32)
+
+        matrix, fnames = self._vectorize_batch(events, is_buy)
+        return self._predict_from_matrix(matrix, fnames, is_buy)
+
     @staticmethod
     def _direction_from_primary(primary_probs: np.ndarray) -> np.ndarray:
         classes = np.argmax(primary_probs, axis=1).astype(np.int32)
@@ -272,6 +266,13 @@ class DualModelGate:
         direction[classes == 0] = -1
         direction[classes == 2] = 1
         return direction
+
+    @staticmethod
+    def _direction_from_event_side(events: Sequence[RawBSPEvent]) -> np.ndarray:
+        return np.array(
+            [1 if bool(ev.is_buy) else -1 for ev in events],
+            dtype=np.int32,
+        )
 
     def _meta_prob_batch(
         self,
@@ -284,11 +285,11 @@ class DualModelGate:
         if not np.any(active):
             return out
         if self.meta_model is None:
-            # Legacy fallback: max non-timeout class probability.
-            out[active] = np.max(
-                p_primary[active][:, [0, 2]],
-                axis=1,
-            ).astype(np.float32)
+            # Legacy fallback: use PT probability as execution confidence.
+            if p_primary.shape[1] >= 3:
+                out[active] = p_primary[active, 2].astype(np.float32)
+            else:
+                out[active] = p_primary[active, -1].astype(np.float32)
             return out
 
         p_block = p_primary[active]
@@ -299,11 +300,10 @@ class DualModelGate:
             if expect_primary_cols == 2 and p_block.shape[1] >= 3:
                 p_block = p_block[:, [0, 2]]
             elif expect_primary_cols == 1:
-                p_block = np.max(
-                    p_block[:, [0, 2]] if p_block.shape[1] >= 3 else p_block,
-                    axis=1,
-                    keepdims=True,
-                )
+                if p_block.shape[1] >= 3:
+                    p_block = p_block[:, [2]]
+                else:
+                    p_block = p_block[:, -1].reshape(-1, 1)
 
         meta_input = np.hstack(
             [np.nan_to_num(X[active], nan=0.0), p_block]
@@ -313,6 +313,26 @@ class DualModelGate:
             dtype=np.float32,
         )
         return out
+
+    @staticmethod
+    def _primary_pt_selected(primary_probs: np.ndarray) -> np.ndarray:
+        """Return whether primary model selects PT class for each event.
+
+        Supports both legacy 3-class and binary models.
+        """
+        if primary_probs.ndim != 2 or primary_probs.shape[0] == 0:
+            return np.zeros(primary_probs.shape[0], dtype=bool)
+
+        if primary_probs.shape[1] >= 3:
+            classes = np.argmax(primary_probs, axis=1).astype(np.int32)
+            return classes == 2
+
+        # Binary fallback: treat p(class=1) >= 0.5 as PT-selected.
+        if primary_probs.shape[1] == 2:
+            return primary_probs[:, 1] >= 0.5
+
+        # Degenerate single-column fallback.
+        return primary_probs[:, 0] >= 0.5
 
     def score_event(self, event: RawBSPEvent) -> ScoredSignalEvent:
         scored = self.score_events([event])
@@ -338,53 +358,81 @@ class DualModelGate:
                 sell_idx.append(idx)
                 sell_events.append(ev)
 
-        buy_primary = self._predict_batch(buy_events, True)
-        sell_primary = self._predict_batch(sell_events, False)
+        n_events = len(events)
+        probs = np.zeros(n_events, dtype=np.float32)
+        direction = np.zeros(n_events, dtype=np.int32)
+        primary_pt_selected = np.zeros(n_events, dtype=bool)
+        primary_pt_conf = np.zeros(n_events, dtype=np.float32)
 
-        primary_probs = np.zeros((len(events), 3), dtype=np.float32)
-        for i, idx in enumerate(buy_idx):
-            primary_probs[idx] = buy_primary[i]
-        for i, idx in enumerate(sell_idx):
-            primary_probs[idx] = sell_primary[i]
+        if buy_events:
+            buy_X, buy_fnames = self._vectorize_batch(buy_events, True)
+            buy_primary = self._predict_from_matrix(buy_X, buy_fnames, True)
+            buy_direction = np.ones(len(buy_events), dtype=np.int32)
+            buy_probs = self._meta_prob_batch(buy_X, buy_primary, buy_direction)
+            buy_pt_selected = self._primary_pt_selected(buy_primary)
+            buy_pt_conf = (
+                buy_primary[:, 2].astype(np.float32)
+                if buy_primary.shape[1] >= 3
+                else buy_primary[:, -1].astype(np.float32)
+            )
+            for i, event_idx in enumerate(buy_idx):
+                probs[event_idx] = buy_probs[i]
+                direction[event_idx] = 1
+                primary_pt_selected[event_idx] = bool(buy_pt_selected[i])
+                primary_pt_conf[event_idx] = buy_pt_conf[i]
 
-        # Rebuild raw feature matrix in original event order for meta gating.
-        X = np.full(
-            (len(events), len(self.meta_buy)),
-            np.nan,
-            dtype=np.float32,
-        )
-        for idx, ev in enumerate(events):
-            row, _, _ = self._vectorize(ev, bool(ev.is_buy))
-            X[idx] = row
-
-        direction = self._direction_from_primary(primary_probs)
-        probs = self._meta_prob_batch(X, primary_probs, direction)
+        if sell_events:
+            sell_X, sell_fnames = self._vectorize_batch(sell_events, False)
+            sell_primary = self._predict_from_matrix(sell_X, sell_fnames, False)
+            sell_direction = -np.ones(len(sell_events), dtype=np.int32)
+            sell_probs = self._meta_prob_batch(sell_X, sell_primary, sell_direction)
+            sell_pt_selected = self._primary_pt_selected(sell_primary)
+            sell_pt_conf = (
+                sell_primary[:, 2].astype(np.float32)
+                if sell_primary.shape[1] >= 3
+                else sell_primary[:, -1].astype(np.float32)
+            )
+            for i, event_idx in enumerate(sell_idx):
+                probs[event_idx] = sell_probs[i]
+                direction[event_idx] = -1
+                primary_pt_selected[event_idx] = bool(sell_pt_selected[i])
+                primary_pt_conf[event_idx] = sell_pt_conf[i]
 
         scored: List[ScoredSignalEvent] = []
-        threshold = self.config.signal_threshold + self.config.signal_margin
-        primary_conf = np.max(primary_probs[:, [0, 2]], axis=1)
 
-        qualified_arr = np.zeros(len(events), dtype=bool)
-        for idx in range(len(events)):
-            qualified_arr[idx] = bool(
-                (float(probs[idx]) >= threshold) and (direction[idx] != 0)
-            )
+        thresholds = np.fromiter(
+            (self._event_threshold(events[idx], int(direction[idx])) for idx in range(n_events)),
+            dtype=np.float32,
+            count=n_events,
+        )
 
-        # Robust fallback for fully empty backtests.
-        if not np.any(qualified_arr) and len(events) > 0:
-            q = max(0.0, min(1.0, 1.0 - self._EMPTY_SIGNAL_TARGET_RATE))
-            adaptive_thr = float(np.quantile(primary_conf, q))
-            qualified_arr = primary_conf >= adaptive_thr
-            probs = primary_conf.astype(np.float32)
-            direction = np.array(
-                [1 if bool(ev.is_buy) else -1 for ev in events],
-                dtype=np.int32,
-            )
+        use_primary_gate = not self.has_meta_model
+        if use_primary_gate:
+            qualified_arr = np.logical_and(primary_pt_selected, probs >= thresholds)
+        else:
+            qualified_arr = probs >= thresholds
+
+        # Optional fallback for fully empty symbols.
+        use_fallback = bool(getattr(self.config, "empty_signal_fallback", False))
+        target_rate = float(
+            getattr(self.config, "empty_signal_target_rate", self._EMPTY_SIGNAL_TARGET_RATE)
+        )
+        target_rate = max(0.0, min(1.0, target_rate))
+        if use_fallback and target_rate > 0.0 and (not np.any(qualified_arr)) and n_events > 0:
+            q = max(0.0, min(1.0, 1.0 - target_rate))
+            fallback_conf = probs if self.has_meta_model else primary_pt_conf
+            adaptive_thr = float(np.nanquantile(fallback_conf, q))
+            if not math.isfinite(adaptive_thr):
+                adaptive_thr = float(np.nan_to_num(adaptive_thr, nan=1.0, posinf=1.0, neginf=0.0))
+            normalized_conf = np.nan_to_num(fallback_conf, nan=0.0, posinf=1.0, neginf=0.0)
+            qualified_arr = normalized_conf >= adaptive_thr
+            probs = fallback_conf.astype(np.float32)
+            direction = self._direction_from_event_side(events)
 
         for idx, ev in enumerate(events):
             prob = float(probs[idx])
             qualified = bool(qualified_arr[idx])
-            if not qualified or direction[idx] == 0:
+            if not qualified:
                 signal = 0
             else:
                 signal = int(direction[idx])

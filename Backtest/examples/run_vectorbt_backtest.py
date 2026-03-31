@@ -29,6 +29,10 @@ def main() -> None:
         print(f"  report:  {result.artifacts.report_html}")
         if result.artifacts.report_detail_html is not None:
             print(f"  report_detail:  {result.artifacts.report_detail_html}")
+        if result.artifacts.trades_csv is not None:
+            print(f"  trades_csv:  {result.artifacts.trades_csv}")
+        if result.artifacts.equity_csv is not None:
+            print(f"  equity_csv:  {result.artifacts.equity_csv}")
 
 
 if __name__ == "__main__":

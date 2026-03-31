@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 from typing import Dict, Optional, Tuple
 
 import pandas as pd
@@ -36,6 +39,10 @@ RESAMPLE_RULE_MAP = {
 }
 
 FALLBACK_INTERVAL = "5m"
+
+
+_BARS_CACHE_LOCK = Lock()
+_BARS_CACHE: "OrderedDict[tuple, pd.DataFrame]" = OrderedDict()
 
 
 def _parse_bound(value: Optional[str], is_end: bool) -> Optional[pd.Timestamp]:
@@ -85,6 +92,41 @@ def _resolve_source_path(data_dir: Path, symbol: str, kl_type: KL_TYPE) -> Tuple
     raise FileNotFoundError(f"Parquet file not found for {symbol} ({interval})")
 
 
+def _cache_key(config: BacktestConfig, symbol: str, source_path: Path, need_resample: bool) -> tuple:
+    return (
+        _normalize_symbol(symbol),
+        str(config.kl_type),
+        str(config.begin_time),
+        str(config.end_time),
+        str(source_path),
+        bool(need_resample),
+    )
+
+
+def _cache_get(key: tuple, max_size: int) -> Optional[pd.DataFrame]:
+    if max_size <= 0:
+        return None
+
+    with _BARS_CACHE_LOCK:
+        cached = _BARS_CACHE.get(key)
+        if cached is None:
+            return None
+        _BARS_CACHE.move_to_end(key)
+        # Return a lightweight copy to avoid accidental cross-task mutation.
+        return cached.copy(deep=False)
+
+
+def _cache_put(key: tuple, frame: pd.DataFrame, max_size: int) -> None:
+    if max_size <= 0:
+        return
+
+    with _BARS_CACHE_LOCK:
+        _BARS_CACHE[key] = frame
+        _BARS_CACHE.move_to_end(key)
+        while len(_BARS_CACHE) > max_size:
+            _BARS_CACHE.popitem(last=False)
+
+
 def _resample_if_needed(df: pd.DataFrame, kl_type: KL_TYPE, need_resample: bool) -> pd.DataFrame:
     if not need_resample:
         return df
@@ -115,7 +157,13 @@ def load_symbol_bars(config: BacktestConfig, symbol: str) -> pd.DataFrame:
     data_dir = project_root / "data"
 
     source_path, need_resample = _resolve_source_path(data_dir, symbol, config.kl_type)
-    df = pd.read_parquet(source_path, columns=REQUIRED_COLUMNS)
+    max_cache_size = int(getattr(config, "data_cache_size", 0) or 0)
+    key = _cache_key(config, symbol, source_path, need_resample)
+    cached = _cache_get(key, max_cache_size)
+    if cached is not None:
+        return cached
+
+    df = pd.read_parquet(source_path, columns=REQUIRED_COLUMNS, use_threads=True)
 
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
@@ -124,14 +172,19 @@ def load_symbol_bars(config: BacktestConfig, symbol: str) -> pd.DataFrame:
     df = df[REQUIRED_COLUMNS].copy()
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
     for col in REQUIRED_COLUMNS[1:]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+        if not pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df = (
-        df.dropna(subset=["open_time", "open", "high", "low", "close"])
-        .drop_duplicates(subset=["open_time"])
-        .sort_values("open_time")
-        .reset_index(drop=True)
-    )
+    df = df.dropna(subset=["open_time", "open", "high", "low", "close"])
+
+    open_time = df["open_time"]
+    if not open_time.is_monotonic_increasing:
+        df = df.sort_values("open_time")
+        open_time = df["open_time"]
+    if not open_time.is_unique:
+        df = df.drop_duplicates(subset=["open_time"])
+
+    df = df.reset_index(drop=True)
 
     df = _resample_if_needed(df, config.kl_type, need_resample)
 
@@ -144,6 +197,7 @@ def load_symbol_bars(config: BacktestConfig, symbol: str) -> pd.DataFrame:
 
     out = df.set_index("open_time")[["open", "high", "low", "close", "volume"]].copy()
     out.index.name = "time"
+    _cache_put(key, out, max_cache_size)
     return out
 
 
@@ -152,3 +206,18 @@ def load_multi_symbol_bars(config: BacktestConfig) -> Dict[str, pd.DataFrame]:
     for symbol in config.normalized_symbols():
         bars[symbol] = load_symbol_bars(config, symbol)
     return bars
+
+
+def preload_symbol_bars(config: BacktestConfig, symbols: list[str], workers: int = 1) -> Dict[str, pd.DataFrame]:
+    loaded: Dict[str, pd.DataFrame] = {}
+    if workers <= 1:
+        for symbol in symbols:
+            loaded[symbol] = load_symbol_bars(config, symbol)
+        return loaded
+
+    worker_count = max(1, min(int(workers), len(symbols)))
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        frame_list = list(pool.map(lambda sym: load_symbol_bars(config, sym), symbols))
+    for symbol, frame in zip(symbols, frame_list):
+        loaded[symbol] = frame
+    return loaded

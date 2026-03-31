@@ -20,15 +20,13 @@ def _event_pairs_sorted(
 
 
 def _lookup_t0_pos(index: pd.DatetimeIndex, ts: pd.Timestamp) -> int:
-    loc = int(index.searchsorted(ts, side="left"))
-    if loc >= len(index):
-        loc = len(index) - 1
-    if loc <= 0:
+    # Use floor alignment to avoid any chance of referencing future bars.
+    loc = int(index.searchsorted(ts, side="right")) - 1
+    if loc < 0:
         return 0
-    # Nearest bar to event timestamp.
-    prev_ts = index[loc - 1]
-    cur_ts = index[loc]
-    return loc - 1 if abs(ts - prev_ts) <= abs(cur_ts - ts) else loc
+    if loc >= len(index):
+        return len(index) - 1
+    return loc
 
 
 def _build_chan_struct(feature_map: Dict[str, float]) -> Dict[str, float]:
@@ -65,14 +63,17 @@ def enrich_raw_events_with_feature_engine(
 
     fe = FeatureEngine(FeatureConfig(symbol_workers=1))
     pairs = _event_pairs_sorted(raw_events)
+    bars_index = bars.index
+    bars_time_text = bars_index.strftime("%Y-%m-%d %H:%M:%S")
+    bars_open_ts = bars_index.asi8.astype(np.float64) / 1_000_000_000.0
 
     samples = []
     for _, ev in pairs:
-        t0_pos = _lookup_t0_pos(bars.index, ev.exec_time)
+        t0_pos = _lookup_t0_pos(bars_index, ev.exec_time)
         samples.append(
             {
                 "symbol": symbol,
-                "open_time": bars.index[t0_pos].strftime("%Y-%m-%d %H:%M:%S"),
+                "open_time": bars_time_text[t0_pos],
                 "t0_ts": float(ev.exec_time.timestamp()),
                 "t0_pos": int(t0_pos),
                 "is_buy": bool(ev.is_buy),
@@ -83,20 +84,24 @@ def enrich_raw_events_with_feature_engine(
             }
         )
 
-    bars_records = []
-    for pos, (ts, row) in enumerate(bars.iterrows()):
-        bars_records.append(
-            {
-                "klu_idx": int(pos),
-                "open_ts": float(ts.timestamp()),
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": float(row["volume"]),
-                "time": ts.strftime("%Y-%m-%d %H:%M:%S"),
-            }
-        )
+    opens = bars["open"].to_numpy(dtype=np.float64, copy=False)
+    highs = bars["high"].to_numpy(dtype=np.float64, copy=False)
+    lows = bars["low"].to_numpy(dtype=np.float64, copy=False)
+    closes = bars["close"].to_numpy(dtype=np.float64, copy=False)
+    volumes = bars["volume"].to_numpy(dtype=np.float64, copy=False)
+    bars_records = [
+        {
+            "klu_idx": int(pos),
+            "open_ts": float(bars_open_ts[pos]),
+            "open": float(opens[pos]),
+            "high": float(highs[pos]),
+            "low": float(lows[pos]),
+            "close": float(closes[pos]),
+            "volume": float(volumes[pos]),
+            "time": bars_time_text[pos],
+        }
+        for pos in range(len(bars_index))
+    ]
 
     sample_df = fe._build_sample_df(samples).reset_index(drop=True)
     sample_df = sample_df.sort_values("t0_ts")
@@ -117,12 +122,16 @@ def enrich_raw_events_with_feature_engine(
             ordered_index=pd.RangeIndex(len(feat_df)),
         )
 
+    feat_cols = list(feat_df.columns)
+    feat_values = feat_df.to_numpy(dtype=np.float32, copy=False) if len(feat_df) > 0 else np.empty((0, 0), dtype=np.float32)
+
     for i, (orig_idx, _) in enumerate(pairs):
-        if i >= len(feat_df):
+        if i >= feat_values.shape[0]:
             break
-        row = feat_df.iloc[i]
         merged = dict(raw_events[orig_idx].feature_map)
-        for k, v in row.to_dict().items():
+        row_values = feat_values[i]
+        for col_idx, k in enumerate(feat_cols):
+            v = row_values[col_idx]
             try:
                 fv = float(v)
             except Exception:

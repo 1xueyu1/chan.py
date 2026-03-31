@@ -65,6 +65,8 @@ class BacktestArtifacts:
     metrics_json: Path
     report_html: Path
     report_detail_html: Optional[Path] = None
+    trades_csv: Optional[Path] = None
+    equity_csv: Optional[Path] = None
 
 
 @dataclass

@@ -8,6 +8,7 @@ from Chan import CChan
 from ChanConfig import CChanConfig
 from ChanModel.feature_center import build_features
 from Common.CEnum import AUTYPE
+from Common.ChanException import CChanException, ErrCode
 
 from .config import BacktestConfig
 from .types import RawBSPEvent
@@ -43,44 +44,51 @@ def extract_raw_bsp_events(config: BacktestConfig, symbol: str) -> List[RawBSPEv
     events: List[RawBSPEvent] = []
     seen_klu_idx = set()
 
-    for snapshot in chan.step_load():
-        if len(snapshot[0]) == 0 or len(snapshot[0][-1]) == 0:
-            continue
+    try:
+        for snapshot in chan.step_load():
+            if len(snapshot[0]) == 0 or len(snapshot[0][-1]) == 0:
+                continue
 
-        bsp_list = snapshot.get_latest_bsp()
-        if not bsp_list:
-            continue
+            bsp_list = snapshot.get_latest_bsp()
+            if not bsp_list:
+                continue
 
-        last_bsp = bsp_list[0]
-        cur_lv_chan = snapshot[0]
-        if last_bsp.klu.idx in seen_klu_idx:
-            continue
-        if len(cur_lv_chan) < 2 or cur_lv_chan[-2].idx != last_bsp.klu.klc.idx:
-            continue
+            last_bsp = bsp_list[0]
+            cur_lv_chan = snapshot[0]
+            if last_bsp.klu.idx in seen_klu_idx:
+                continue
+            if len(cur_lv_chan) < 2 or cur_lv_chan[-2].idx != last_bsp.klu.klc.idx:
+                continue
 
-        seen_klu_idx.add(last_bsp.klu.idx)
+            seen_klu_idx.add(last_bsp.klu.idx)
 
-        last_klu = cur_lv_chan[-1][-1]
-        extra_feat = build_features(klu=last_klu, history=cur_lv_chan.lst, chan=cur_lv_chan)
-        last_bsp.features.add_feat(extra_feat)
+            last_klu = cur_lv_chan[-1][-1]
+            extra_feat = build_features(klu=last_klu, history=cur_lv_chan.lst, chan=cur_lv_chan)
+            last_bsp.features.add_feat(extra_feat)
 
-        feature_map = {
-            feat_name: _safe_float(feat_value)
-            for feat_name, feat_value in last_bsp.features.items()
-        }
+            feature_map = {
+                feat_name: _safe_float(feat_value)
+                for feat_name, feat_value in last_bsp.features.items()
+            }
 
-        event = RawBSPEvent(
-            symbol=symbol,
-            exec_time=_make_exec_time(snapshot),
-            bsp_time=str(last_bsp.klu.time),
-            is_buy=bool(last_bsp.is_buy),
-            bsp_type=last_bsp.type[0].value[0],
-            bsp_types_str=last_bsp.type2str(),
-            trade_price=float(last_klu.close),
-            klu_idx=int(last_bsp.klu.idx),
-            feature_map=feature_map,
-        )
-        events.append(event)
+            event = RawBSPEvent(
+                symbol=symbol,
+                exec_time=_make_exec_time(snapshot),
+                bsp_time=str(last_bsp.klu.time),
+                is_buy=bool(last_bsp.is_buy),
+                bsp_type=last_bsp.type[0].value[0],
+                bsp_types_str=last_bsp.type2str(),
+                trade_price=float(last_klu.close),
+                klu_idx=int(last_bsp.klu.idx),
+                feature_map=feature_map,
+            )
+            events.append(event)
+    except CChanException as ex:
+        if ex.errcode == ErrCode.NO_DATA:
+            # Some symbols may have no usable bars in the selected window.
+            print(f"[BACKTEST][WARN] {symbol} no data in range, skip signal extraction.")
+            return []
+        raise
 
     events.sort(key=lambda x: (x.exec_time, x.klu_idx))
     return events

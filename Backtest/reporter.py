@@ -292,20 +292,38 @@ def _cap_table_rows(rows: Optional[List[Dict[str, Any]]], max_rows: int) -> tupl
 
 def _build_executed_trade_rows(
     per_symbol: List[SymbolBacktestResult],
-    initial_cash: float,
-    execution_mode: str,
+    all_events: Iterable[ScoredSignalEvent],
 ) -> List[Dict[str, Any]]:
-    del initial_cash, execution_mode
+    signal_lookup: Dict[tuple[str, str, int], ScoredSignalEvent] = {}
+    for ev in all_events:
+        key = (str(ev.symbol), pd.Timestamp(ev.exec_time).strftime("%Y-%m-%d %H:%M:%S"), int(ev.signal))
+        prev = signal_lookup.get(key)
+        if prev is None or float(ev.probability) > float(prev.probability):
+            signal_lookup[key] = ev
+
     rows: List[Dict[str, Any]] = []
 
     for item in per_symbol:
         for trade in item.closed_trades:
+            symbol = str(trade.get("symbol", item.symbol))
+            direction = str(trade.get("direction", "long"))
+            entry_time = str(trade.get("entry_time", ""))
+            exit_time = str(trade.get("exit_time", ""))
+
+            if direction.lower() == "short":
+                entry_signal, exit_signal = -1, 1
+            else:
+                entry_signal, exit_signal = 1, -1
+
+            entry_event = signal_lookup.get((symbol, entry_time, entry_signal))
+            exit_event = signal_lookup.get((symbol, exit_time, exit_signal))
+
             rows.append(
                 {
-                    "symbol": str(trade.get("symbol", item.symbol)),
-                    "direction": str(trade.get("direction", "long")),
-                    "entry_time": str(trade.get("entry_time", "")),
-                    "exit_time": str(trade.get("exit_time", "")),
+                    "symbol": symbol,
+                    "direction": direction,
+                    "entry_time": entry_time,
+                    "exit_time": exit_time,
                     "holding_bars": int(trade.get("holding_bars", 0)),
                     "entry_price": trade.get("entry_price"),
                     "exit_price": trade.get("exit_price"),
@@ -316,6 +334,16 @@ def _build_executed_trade_rows(
                     "equity_after": trade.get("equity_after"),
                     "equity_delta": trade.get("equity_delta"),
                     "equity_delta_pct": trade.get("equity_delta_pct"),
+                    "entry_signal": entry_signal,
+                    "entry_model_prob": (float(entry_event.probability) if entry_event is not None else None),
+                    "entry_qualified": (bool(entry_event.qualified) if entry_event is not None else None),
+                    "entry_bsp_type": (entry_event.bsp_type if entry_event is not None else None),
+                    "entry_bsp_types_str": (entry_event.bsp_types_str if entry_event is not None else None),
+                    "exit_signal": exit_signal,
+                    "exit_model_prob": (float(exit_event.probability) if exit_event is not None else None),
+                    "exit_qualified": (bool(exit_event.qualified) if exit_event is not None else None),
+                    "exit_bsp_type": (exit_event.bsp_type if exit_event is not None else None),
+                    "exit_bsp_types_str": (exit_event.bsp_types_str if exit_event is not None else None),
                 }
             )
 
@@ -569,6 +597,28 @@ def bars_to_dataframe(symbol_result: SymbolBacktestResult) -> pd.DataFrame:
     bars = bars.reset_index().rename(columns={"time": "time"})
     bars["time"] = pd.to_datetime(bars["time"], utc=True).dt.strftime("%Y-%m-%d %H:%M:%S")
     return bars[["time", "open", "high", "low", "close", "volume", "signal", "position", "symbol"]]
+
+
+def portfolio_equity_to_dataframe(
+    per_symbol: List[SymbolBacktestResult],
+    portfolio_equity: pd.Series,
+    portfolio_drawdown: pd.Series,
+) -> pd.DataFrame:
+    cols: Dict[str, pd.Series] = {
+        "portfolio_equity": portfolio_equity.astype(float),
+        "portfolio_drawdown": portfolio_drawdown.astype(float),
+    }
+    for item in per_symbol:
+        cols[f"equity_{item.symbol}"] = item.equity_curve.reindex(portfolio_equity.index).ffill().astype(float)
+
+    frame = pd.DataFrame(cols, index=portfolio_equity.index)
+
+    frame = frame.reset_index()
+    index_col = frame.columns[0]
+    if index_col != "time":
+        frame = frame.rename(columns={index_col: "time"})
+    frame["time"] = pd.to_datetime(frame["time"], utc=True).dt.strftime("%Y-%m-%d %H:%M:%S")
+    return frame
 
 
 def save_metrics_json(path: Path, metrics: Dict[str, float]) -> None:
@@ -847,6 +897,8 @@ def write_outputs(
     save_metrics_json_flag: bool,
     save_html_report_flag: bool,
     save_html_detail_report_flag: bool,
+    save_trades_csv_flag: bool = True,
+    save_equity_csv_flag: bool = True,
     report_params: Optional[Dict[str, Any]] = None,
 ) -> BacktestArtifacts:
     out = ensure_output_dir(output_dir)
@@ -856,6 +908,8 @@ def write_outputs(
     metrics_path = out / "backtest_metrics.json"
     report_path = out / "xgb_backtest_report.html"
     report_detail_path = out / "xgb_backtest_report_detail.html"
+    trades_path = out / "executed_trades.csv"
+    equity_path = out / "portfolio_equity_curve.csv"
 
     all_events = []
     for item in per_symbol:
@@ -882,13 +936,65 @@ def write_outputs(
         }
         save_metrics_json(metrics_path, payload)
 
-    if save_html_report_flag or save_html_detail_report_flag:
+    needs_curve = save_html_report_flag or save_html_detail_report_flag or save_equity_csv_flag
+    eq: Optional[pd.Series] = None
+    dd: Optional[pd.Series] = None
+    if needs_curve:
         if len(per_symbol) == 1:
             eq = per_symbol[0].equity_curve
             dd = per_symbol[0].drawdown_curve
         else:
             eq = pd.concat([item.equity_curve.rename(item.symbol) for item in per_symbol], axis=1).ffill().mean(axis=1)
             dd = eq / eq.cummax() - 1.0
+
+    executed_trade_rows: Optional[List[Dict[str, Any]]] = None
+    if save_trades_csv_flag or save_html_detail_report_flag:
+        executed_trade_rows = _build_executed_trade_rows(
+            per_symbol=per_symbol,
+            all_events=all_events,
+        )
+
+    if save_trades_csv_flag:
+        trade_columns = [
+            "symbol",
+            "direction",
+            "entry_time",
+            "exit_time",
+            "holding_bars",
+            "entry_price",
+            "exit_price",
+            "pnl",
+            "return_pct",
+            "fees",
+            "equity_before",
+            "equity_after",
+            "equity_delta",
+            "equity_delta_pct",
+            "entry_signal",
+            "entry_model_prob",
+            "entry_qualified",
+            "entry_bsp_type",
+            "entry_bsp_types_str",
+            "exit_signal",
+            "exit_model_prob",
+            "exit_qualified",
+            "exit_bsp_type",
+            "exit_bsp_types_str",
+        ]
+        trade_df = pd.DataFrame(executed_trade_rows or [], columns=trade_columns)
+        trade_df.to_csv(trades_path, index=False, encoding="utf-8")
+
+    if save_equity_csv_flag and eq is not None and dd is not None:
+        equity_df = portfolio_equity_to_dataframe(
+            per_symbol=per_symbol,
+            portfolio_equity=eq,
+            portfolio_drawdown=dd,
+        )
+        equity_df.to_csv(equity_path, index=False, encoding="utf-8")
+
+    if save_html_report_flag or save_html_detail_report_flag:
+        if eq is None or dd is None:
+            raise RuntimeError("portfolio equity curve is required for html report generation")
 
         per_symbol_metrics = [
             {
@@ -914,15 +1020,6 @@ def write_outputs(
             report_path.write_text(summary_html, encoding="utf-8")
 
         if save_html_detail_report_flag:
-            exec_mode = "next_bar_open"
-            if report_params and isinstance(report_params.get("execution_mode"), str):
-                exec_mode = str(report_params.get("execution_mode"))
-            initial_cash = float(aggregate_metrics.get("start_cash", 0.0) or 0.0)
-            executed_trade_rows = _build_executed_trade_rows(
-                per_symbol=per_symbol,
-                initial_cash=initial_cash,
-                execution_mode=exec_mode,
-            )
             detail_html = _render_html_report(
                 report_title="Chan 策略回测报告（Detail, XGBoost + SHAP）",
                 metrics=aggregate_metrics,
@@ -943,4 +1040,6 @@ def write_outputs(
         metrics_json=metrics_path,
         report_html=report_path,
         report_detail_html=(report_detail_path if save_html_detail_report_flag else None),
+        trades_csv=(trades_path if save_trades_csv_flag else None),
+        equity_csv=(equity_path if save_equity_csv_flag else None),
     )
