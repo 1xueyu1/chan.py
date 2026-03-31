@@ -47,20 +47,19 @@ class FeatureEngine:
 
     @staticmethod
     def _build_sample_df(samples: List[Dict]) -> pd.DataFrame:
-        rows = []
-        for item in samples:
-            rows.append(
-                {
-                    "symbol": item["symbol"],
-                    "open_time": item["open_time"],
-                    "t0_ts": float(item["t0_ts"]),
-                    "t0_pos": int(item["t0_pos"]),
-                    "is_buy": bool(item["is_buy"]),
-                    "bsp_main_type": str(item["bsp_main_type"]),
-                    "realized_return": float(item.get("realized_return", 0.0)),
-                    "raw": item,
-                }
-            )
+        rows = [
+            {
+                "symbol": item["symbol"],
+                "open_time": item["open_time"],
+                "t0_ts": float(item["t0_ts"]),
+                "t0_pos": int(item["t0_pos"]),
+                "is_buy": bool(item["is_buy"]),
+                "bsp_main_type": str(item["bsp_main_type"]),
+                "realized_return": float(item.get("realized_return", 0.0)),
+                "raw": item,
+            }
+            for item in samples
+        ]
         df = pd.DataFrame(rows).sort_values(["t0_ts", "symbol", "t0_pos"]).reset_index(drop=True)
         df.index = pd.to_datetime(df["t0_ts"], unit="s", utc=True)
         return df
@@ -90,6 +89,35 @@ class FeatureEngine:
         return event_bar_lookup, pos_lookup
 
     @staticmethod
+    def _precompute_bar_regime(symbol_bars: pd.DataFrame | None) -> Tuple[np.ndarray, np.ndarray]:
+        if symbol_bars is None or len(symbol_bars) == 0:
+            return np.empty((0,), dtype=np.float32), np.empty((0,), dtype=np.float32)
+
+        close = pd.to_numeric(symbol_bars["close"], errors="coerce")
+        returns = close.pct_change()
+        annualizer = float(np.sqrt(252.0))
+
+        rv5 = (
+            returns.rolling(window=5, min_periods=5).std(ddof=0) * annualizer
+        ).fillna(0.0).to_numpy(dtype=np.float32, copy=False)
+
+        full_vol = returns.rolling(window=252, min_periods=20).std(ddof=0) * annualizer
+        q1 = full_vol.rolling(window=252, min_periods=20).quantile(0.33)
+        q2 = full_vol.rolling(window=252, min_periods=20).quantile(0.66)
+
+        full_arr = full_vol.to_numpy(dtype=np.float64, copy=False)
+        q1_arr = q1.to_numpy(dtype=np.float64, copy=False)
+        q2_arr = q2.to_numpy(dtype=np.float64, copy=False)
+
+        vol_regime = np.ones(len(symbol_bars), dtype=np.float32)
+        finite_low = np.isfinite(full_arr) & np.isfinite(q1_arr)
+        finite_high = np.isfinite(full_arr) & np.isfinite(q2_arr)
+        vol_regime[finite_low & (full_arr < q1_arr)] = 0.0
+        vol_regime[finite_high & (full_arr >= q2_arr)] = 2.0
+
+        return rv5, vol_regime
+
+    @staticmethod
     def _transform_symbol_samples(
         symbol: str,
         symbol_sample_df: pd.DataFrame,
@@ -104,11 +132,13 @@ class FeatureEngine:
         feature_index: List[pd.Timestamp] = []
 
         event_bar_lookup, pos_lookup = FeatureEngine._build_symbol_event_bar_lookup(symbol_bars)
+        rv5_arr, vol_regime_arr = FeatureEngine._precompute_bar_regime(symbol_bars)
 
-        for ts, row in symbol_sample_df.iterrows():
-            raw = row["raw"]
-            event_dir = 1 if bool(row["is_buy"]) else -1
-            bsp_type = str(row["bsp_main_type"])
+        for row in symbol_sample_df.itertuples(index=True):
+            ts = row.Index
+            raw = row.raw
+            event_dir = 1 if bool(row.is_buy) else -1
+            bsp_type = str(row.bsp_main_type)
 
             structural_features = compute_chan_structure_context_features(raw)
 
@@ -127,12 +157,12 @@ class FeatureEngine:
             microstructure_features = compute_price_volume_microstructure_features(event_bar)
 
             ret_hist = same_dir_win_hist[event_dir]
-            ret_hist.append(1 if float(row["realized_return"]) > 0 else 0)
+            ret_hist.append(1 if float(row.realized_return) > 0 else 0)
             while len(ret_hist) > 20:
                 ret_hist.popleft()
 
             days_since = 0.0
-            cur_ts = float(row["t0_ts"])
+            cur_ts = float(row.t0_ts)
             if last_signal_ts is not None:
                 days_since = max(0.0, (cur_ts - last_signal_ts) / 86400.0)
             last_signal_ts = cur_ts
@@ -142,21 +172,10 @@ class FeatureEngine:
             trend_proxy = abs(float(raw.get("chan_struct", {}).get("seg_direction", 0.0))) * 25.0
             if symbol_bars is not None and event_bar:
                 cur_pos = pos_lookup.get(event_klu_idx, -1)
-                if cur_pos >= 0:
-                    hist = symbol_bars.iloc[max(0, cur_pos - 251) : cur_pos + 1]
-                    if len(hist) > 1:
-                        r = hist["close"].pct_change().dropna()
-                        if len(r) > 4:
-                            rv5 = float(r.tail(5).std(ddof=0) * np.sqrt(252))
-                        full_vol = float(r.std(ddof=0) * np.sqrt(252)) if len(r) > 1 else 0.0
-                        q1 = float(r.quantile(0.33) * np.sqrt(252)) if len(r) > 1 else 0.0
-                        q2 = float(r.quantile(0.66) * np.sqrt(252)) if len(r) > 1 else 0.0
-                        if full_vol < q1:
-                            vol_regime = 0.0
-                        elif full_vol < q2:
-                            vol_regime = 1.0
-                        else:
-                            vol_regime = 2.0
+                if 0 <= cur_pos < len(rv5_arr):
+                    rv5 = float(rv5_arr[cur_pos])
+                if 0 <= cur_pos < len(vol_regime_arr):
+                    vol_regime = float(vol_regime_arr[cur_pos])
 
             d_ctx = {
                 "realized_vol_5": rv5,
@@ -181,7 +200,7 @@ class FeatureEngine:
             merged.update(regime_features)
             merged.update(legacy_fused_features)
 
-            same_type_last_ret[(bsp_type, event_dir)] = float(row["realized_return"])
+            same_type_last_ret[(bsp_type, event_dir)] = float(row.realized_return)
 
             feature_rows.append(merged)
             feature_index.append(ts)

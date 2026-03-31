@@ -11,7 +11,7 @@ import pandas as pd
 from sklearn.metrics import f1_score
 
 from .config import ModelConfig, TrainValidatorConfig
-from .models import MetaModel, PrimaryModel
+from .models import MetaModel, create_primary_model
 from .utils.metrics import annualized_sharpe
 from .validation import PurgedKFold, compute_mdi_mda
 
@@ -32,8 +32,9 @@ class TrainValidator:
     def __init__(self, model_config: ModelConfig, validator_config: TrainValidatorConfig):
         self.model_config = model_config
         self.validator_config = validator_config
-        self.primary_model: PrimaryModel | None = None
+        self.primary_model = None
         self.meta_model: MetaModel | None = None
+        self.primary_backend: str = "unknown"
 
     @staticmethod
     def _signal_from_class(classes: np.ndarray) -> np.ndarray:
@@ -55,10 +56,11 @@ class TrainValidator:
         test_rets: np.ndarray,
         train_mode: str,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, FoldMetrics]:
-        primary = PrimaryModel(
+        primary = create_primary_model(
             params=self.model_config.xgb_params,
             num_rounds=self.model_config.xgb_num_rounds,
             early_stop=self.model_config.xgb_early_stop,
+            train_mode=train_mode,
         ).fit(X_train, y_train, w_train, X_test, y_test, train_mode=train_mode)
 
         p_train = primary.predict_proba(X_train)
@@ -67,7 +69,12 @@ class TrainValidator:
         meta = MetaModel()
         meta_y = (c_train == y_train).astype(int)
         meta_X = self._build_meta_features(X_train, p_train)
-        meta.fit(meta_X, meta_y)
+        meta.fit(
+            meta_X,
+            meta_y,
+            calibration_method=self.model_config.meta_calibration,
+            calibration_ratio=self.model_config.meta_calibration_ratio,
+        )
 
         p_test = primary.predict_proba(X_test)
         c_test = np.argmax(p_test, axis=1)
@@ -141,11 +148,13 @@ class TrainValidator:
             raise RuntimeError("PurgedKFold 未生成有效折，请扩大样本或降低切分数")
 
         # 全量模型
-        self.primary_model = PrimaryModel(
+        self.primary_model = create_primary_model(
             params=self.model_config.xgb_params,
             num_rounds=self.model_config.xgb_num_rounds,
             early_stop=self.model_config.xgb_early_stop,
+            train_mode=train_mode,
         ).fit(X, y, sample_weight, X, y, train_mode=train_mode)
+        self.primary_backend = str(getattr(self.primary_model, "backend", "unknown"))
 
         p_all = self.primary_model.predict_proba(X)
         c_all = np.argmax(p_all, axis=1)
@@ -153,7 +162,12 @@ class TrainValidator:
         self.meta_model = MetaModel()
         meta_y = (c_all == y).astype(int)
         meta_X = self._build_meta_features(X, p_all)
-        self.meta_model.fit(meta_X, meta_y)
+        self.meta_model.fit(
+            meta_X,
+            meta_y,
+            calibration_method=self.model_config.meta_calibration,
+            calibration_ratio=self.model_config.meta_calibration_ratio,
+        )
 
         mdi_df, mda_df = compute_mdi_mda(
             self.primary_model.booster,
@@ -181,8 +195,11 @@ class TrainValidator:
             "engine": "TrainValidator",
             "architecture": {
                 "primary_model": self.model_config.primary_model_type,
+                "primary_backend": self.primary_backend,
                 "meta_model": self.model_config.meta_model_type,
                 "meta_threshold": self.model_config.meta_threshold,
+                "meta_calibration": self.model_config.meta_calibration,
+                "meta_calibration_ratio": self.model_config.meta_calibration_ratio,
                 "cv": {
                     "splits": self.validator_config.n_splits,
                     "embargo_bars": self.validator_config.embargo_bars,
@@ -210,6 +227,7 @@ class TrainValidator:
             "pass_criteria": {
                 "passed": bool(oos_precision >= self.validator_config.pass_precision and oos_sharpe > self.validator_config.pass_sharpe),
                 "rule": f"oos_precision>={self.validator_config.pass_precision} and oos_sharpe>{self.validator_config.pass_sharpe}",
+                "positive_month_ratio_min": float(self.validator_config.pass_positive_month_ratio),
             },
         }
 

@@ -14,6 +14,39 @@ class LabelEngine:
         self.config = config
 
     @staticmethod
+    def _rolling_volatility(closes: np.ndarray, window: int) -> np.ndarray:
+        n = int(closes.size)
+        out = np.zeros(n, dtype=np.float64)
+        if n <= 2:
+            return out
+        safe_close = np.maximum(closes.astype(np.float64), 1e-9)
+        log_ret = np.diff(np.log(safe_close))
+        w = max(8, int(window))
+        for i in range(1, n):
+            s = max(0, i - w)
+            seg = log_ret[s:i]
+            out[i] = float(np.std(seg)) if seg.size > 1 else 0.0
+        return out
+
+    def _resolve_dynamic_pt_multiplier(
+        self,
+        vol_value: float,
+        vol_q_low: float,
+        vol_q_high: float,
+    ) -> tuple[float, str]:
+        if not bool(self.config.dynamic_pt_enabled):
+            return float(self.config.pt_multiplier), "static"
+
+        if not np.isfinite(vol_value) or vol_q_high <= vol_q_low:
+            return float(self.config.pt_mid_vol_multiplier), "mid"
+
+        if vol_value <= vol_q_low:
+            return float(self.config.pt_low_vol_multiplier), "low"
+        if vol_value >= vol_q_high:
+            return float(self.config.pt_high_vol_multiplier), "high"
+        return float(self.config.pt_mid_vol_multiplier), "mid"
+
+    @staticmethod
     def _safe_float(v) -> float:
         try:
             return float(v)
@@ -88,6 +121,23 @@ class LabelEngine:
         closes = np.asarray([float(b["close"]) for b in bars], dtype=np.float64)
         open_ts = np.asarray([float(b["open_ts"]) for b in bars], dtype=np.float64)
 
+        rolling_vol = None
+        vol_q_low = 0.0
+        vol_q_high = 0.0
+        if bool(self.config.dynamic_pt_enabled):
+            rolling_vol = self._rolling_volatility(
+                closes=closes,
+                window=max(8, int(self.config.vol_window)),
+            )
+            finite_vol = rolling_vol[np.isfinite(rolling_vol)]
+            if finite_vol.size >= 20:
+                q_low = float(np.clip(float(self.config.vol_quantile_low), 0.01, 0.98))
+                q_high = float(np.clip(float(self.config.vol_quantile_high), q_low + 0.01, 0.99))
+                vol_q_low = float(np.quantile(finite_vol, q_low))
+                vol_q_high = float(np.quantile(finite_vol, q_high))
+            else:
+                rolling_vol = None
+
         labeled: List[Dict] = []
         for event in events:
             entry = float(event["trade_price"])
@@ -104,7 +154,21 @@ class LabelEngine:
                 risk = entry * 0.005
                 sl = entry - risk if bool(event["is_buy"]) else entry + risk
 
-            pt = entry + risk * self.config.pt_multiplier if bool(event["is_buy"]) else entry - risk * self.config.pt_multiplier
+            vol_value = float("nan")
+            if rolling_vol is not None and 0 <= int(t0_pos) < int(rolling_vol.size):
+                vol_value = float(rolling_vol[int(t0_pos)])
+
+            pt_multiplier_used, vol_regime = self._resolve_dynamic_pt_multiplier(
+                vol_value=vol_value,
+                vol_q_low=vol_q_low,
+                vol_q_high=vol_q_high,
+            )
+
+            pt = (
+                entry + risk * pt_multiplier_used
+                if bool(event["is_buy"])
+                else entry - risk * pt_multiplier_used
+            )
             end_pos = len(bars) - 1
 
             label_raw = -1
@@ -161,6 +225,9 @@ class LabelEngine:
                     "entry_price": float(entry),
                     "sl_price": float(sl),
                     "pt_price": float(pt),
+                    "pt_multiplier_used": float(pt_multiplier_used),
+                    "volatility_value": float(vol_value) if np.isfinite(vol_value) else None,
+                    "volatility_regime": str(vol_regime),
                     "hit_event": hit_event,
                     "timeout_used": 0,
                     "t0_pos": int(t0_pos),

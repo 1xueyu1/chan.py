@@ -22,8 +22,18 @@ class ExpandingWindowNormalizer:
 
     def fit_transform(self, df: pd.DataFrame, ordered_index: pd.Index | None = None) -> pd.DataFrame:
         out = df.copy()
-        order = ordered_index if ordered_index is not None else out.index
-        ordered = out.loc[order]
+        if ordered_index is None:
+            order_pos = np.arange(len(out), dtype=np.int64)
+        else:
+            if len(ordered_index) != len(out):
+                raise ValueError(
+                    "ordered_index length mismatch: "
+                    f"{len(ordered_index)} != {len(out)}"
+                )
+            # 使用位置索引而非标签索引，避免重复标签导致loc扩容。
+            order_pos = np.argsort(np.asarray(ordered_index), kind="mergesort")
+
+        ordered = out.iloc[order_pos]
 
         for col in out.columns:
             if col in self.categorical_features:
@@ -34,7 +44,7 @@ class ExpandingWindowNormalizer:
             exp_mean = exp_mean.fillna(vals.expanding(min_periods=1).mean())
             exp_std = exp_std.fillna(vals.expanding(min_periods=1).std(ddof=0)).replace(0.0, np.nan)
             transformed = (vals - exp_mean) / (exp_std.fillna(1.0) + 1e-8)
-            out.loc[order, col] = transformed.values
+            out.iloc[order_pos, out.columns.get_loc(col)] = transformed.to_numpy()
 
             self.state.mu[col] = float(vals.mean())
             std = float(vals.std(ddof=0))
