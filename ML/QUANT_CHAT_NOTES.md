@@ -627,7 +627,7 @@ AND trail_continue == false
 当前项目已经实现了：
 
 ```text
-ML\routes\btc_futures_v3_beta_edge\exit_management.py
+ML\shared\post_exit_management.py
 ```
 
 当前 strict exit 结果：

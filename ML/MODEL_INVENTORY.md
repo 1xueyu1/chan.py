@@ -2,7 +2,7 @@
 
 更新时间：2026-06-04
 
-本文件用于整理当前项目中存在过或仍保留代码的数据集、模型路线和回测结果。它不是推荐使用清单；推荐使用清单以 [MODEL_REGISTRY.md](MODEL_REGISTRY.md) 为准。
+当前项目只保留二类买卖点相关路线。旧实验路线已经移除，后续研究集中在二类买卖点结构识别、结构风险定仓和实时出场状态机上。
 
 ## 总览
 
@@ -10,9 +10,6 @@
 |---|---|---|---|---|---|
 | `btc_futures_v1` | 有 | 有 | 有历史 walk-forward 产物 | 保留基准 | 标准二类买卖点基准路线，交易少但对照价值高 |
 | `btc_futures_v2_bsp2_family` | 有 | 有 | 有正式基准产物 | 当前主线 | `decision_realtime_v2` 是当前正式基准 |
-| `btc_futures_v2_stable` | 有 | 有 | 未发现正式模型产物目录 | 历史实验 | 稳定性/严格验证路线，交易频率过低 |
-| `btc_futures_v3_alpha` | 有 | 有 | 未发现正式模型产物目录 | 历史实验 | 结构池/稳定特征路线，严格过滤后无交易 |
-| `btc_futures_v3_beta_edge` | 有 | 有 | 未发现正式模型产物目录 | 历史实验 | 旧 1:1 `label_tp_first` 和阈值路线，不作为当前主线 |
 
 ## 1. `btc_futures_v1`
 
@@ -118,7 +115,7 @@ walk-forward：
 
 ### 历史结果目录
 
-以下目录是历史对照或调试结果，不作为当前正式基准：
+以下目录是二类买卖点族群路线内部的历史对照或调试结果，不作为当前正式基准：
 
 ```text
 result/btc_futures_v2_bsp2_family
@@ -134,121 +131,15 @@ result/btc_futures_v2_bsp2_family_wf_realtime
 result/btc_futures_v2_bsp2_family_wf_realtime_riskcap
 ```
 
-评价：这些结果可以用于复盘演进，但后续实验统一以 `wf_decision_realtime_v2` 为基准。
+后续实验统一以 `wf_decision_realtime_v2` 为基准。
 
-## 3. `btc_futures_v2_stable`
+## 当前共享模块
 
-### 定位
-
-稳定性路线，目标是通过 ATR 自适应 1:1 标签、稳定特征筛选、成本感知阈值和市场状态过滤，换取更稳定的验证表现。
-
-### 数据情况
+旧实验路线删除后，仍被当前二类买卖点路线使用的通用能力迁移到了 shared：
 
 ```text
-data/btc_futures_v2_stable/btc_futures_v2_stable_dataset.parquet
-data/btc_futures_v2_stable/btc_futures_v2_stable_dataset_meta.json
+ML/shared/structure_features.py
+ML/shared/post_exit_management.py
 ```
 
-元信息：
-
-```text
-rows: 14207
-label_rate: 0.4891
-target_mode: atr
-max_holding_minutes: 1440
-lookahead_check: entry_time >= exec_time + 15min
-```
-
-### 当前状态
-
-代码和数据保留，但未发现 `result/ml/btc_futures_v2_stable*` 的正式模型产物目录。
-
-路线结论：严格过滤后交易频率极低，不符合当前项目“二类买卖点族群 + 高频覆盖 + 结构风险定仓”的主线方向。
-
-## 4. `btc_futures_v3_alpha`
-
-### 定位
-
-结构池和稳定特征增强路线。目标是把缠论买卖点拆成更细结构池，再观察哪些结构池在严格验证下有优势。
-
-### 数据情况
-
-```text
-data/btc_futures_v3_alpha/btc_futures_v3_alpha_dataset.parquet
-data/btc_futures_v3_alpha/btc_futures_v3_alpha_dataset_meta.json
-```
-
-元信息：
-
-```text
-rows: 14207
-label_rate: 0.4891
-lookahead_check: entry_time >= exec_time + 15min
-```
-
-### 当前状态
-
-代码和数据保留，但未发现 `result/ml/btc_futures_v3_alpha*` 的正式模型产物目录。
-
-路线结论：严格版曾出现候选信号多但合格信号为 0 的情况，不作为当前主线。
-
-## 5. `btc_futures_v3_beta_edge`
-
-### 定位
-
-旧的 1:1 `label_tp_first` 和阈值路线。它把每个买卖点压成一条样本，买入/卖出方向分别训练，模型目标是：
-
-```text
-P(label_tp_first = 1)
-```
-
-### 数据情况
-
-```text
-data/btc_futures_v3_beta_edge/btc_futures_v3_beta_edge_dataset.parquet
-data/btc_futures_v3_beta_edge/btc_futures_v3_beta_edge_dataset_meta.json
-```
-
-元信息：
-
-```text
-rows: 14207
-label_tp_first_rate: 0.4891
-lookahead_check: one sample per BSP event; entry_time >= exec_time + 15min; beta features use pre-entry 1m bars only
-```
-
-另有仓后生命周期数据：
-
-```text
-data/btc_futures_v3_beta_edge/btc_futures_v3_beta_exit_lifecycle_meta.json
-rows: 29205
-```
-
-### 当前状态
-
-代码和数据保留，但未发现当前命名下的正式模型产物目录。该路线属于旧 1:1 固定标签思路，不作为当前主线。
-
-## 当前建议
-
-### 保留
-
-- `btc_futures_v2_bsp2_family`：当前主线。
-- `btc_futures_v1`：历史基准和对照。
-
-### 暂不继续
-
-- `btc_futures_v2_stable`
-- `btc_futures_v3_alpha`
-- `btc_futures_v3_beta_edge`
-
-这些路线可以保留代码作为参考，但后续不要继续在它们上扩散新实验，除非先写新的实验 spec 并明确为什么要重启。
-
-### 可清理对象
-
-如果后续要进一步瘦身，可以清理以下类别：
-
-1. `result/*smoke*`
-2. 非 `wf_decision_realtime_v2` 的 v2 临时回测结果
-3. `v2_stable/v3_alpha/v3_beta_edge` 的数据集和脚本
-
-但当前本次只做盘点，不删除。
+这两个模块只服务当前二类买卖点路线，不代表独立模型路线。

@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from ML.model import ModelBundle, train_classifier
-from ML.routes.btc_futures_v3_beta_edge.exit_management import (
+from ML.shared.post_exit_management import (
     DEFAULT_MULTI_HEAD_THRESHOLDS,
     MultiHeadExitModelBundle,
     _snapshot_features,

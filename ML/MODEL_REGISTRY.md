@@ -1,6 +1,8 @@
 # 模型登记表
 
-本文件只登记当前仍有管理意义的模型路线。完整盘点见 [MODEL_INVENTORY.md](MODEL_INVENTORY.md)。
+当前项目只保留二类买卖点相关路线。旧实验路线已经从代码、脚本、数据目录和当前登记中移除。
+
+完整盘点见 [MODEL_INVENTORY.md](MODEL_INVENTORY.md)。
 
 ## 当前正式状态
 
@@ -37,20 +39,20 @@
 最差年度回撤：-12.13%
 ```
 
-## 已下线或不作为当前主线的路线
+## 当前保留能力
 
-| 路线 | 当前处理 |
-|---|---|
-| `btc_futures_v2_stable` | 代码和数据保留，因交易频率极低，不作为当前主线 |
-| `btc_futures_v3_alpha` | 代码和数据保留，严格过滤后 2026 无交易，不作为当前主线 |
-| `btc_futures_v3_beta_edge` | 代码和数据保留，属于旧 1:1 标签/阈值路线，不作为当前主线 |
-| `taxonomy_v1` | 已删除 |
-| `hybrid_v1` | 已删除 |
-| `capability_v3` / `capability_v4` / `capability_v5` / `confidence_branch` | 已从当前登记删除 |
+| 能力 | 位置 | 说明 |
+|---|---|---|
+| 二类买卖点族群候选 | `ML/routes/btc_futures_v2_bsp2_family/candidate_family.py` | 当前主线候选生成 |
+| 二类买卖点标签 | `ML/routes/btc_futures_v2_bsp2_family/labels.py` | 当前主线训练标签 |
+| 实时出场状态机 | `ML/routes/btc_futures_v2_bsp2_family/backtest.py` | 当前主线回测和决策口径 |
+| 结构特征增强 | `ML/shared/structure_features.py` | 当前主线复用特征 |
+| 仓后管理能力 | `ML/shared/post_exit_management.py` | 当前主线复用仓后管理 |
 
 ## 后续规则
 
-1. 新实验必须先写 `.claude/experiments/*.md`。
-2. 实验成功后才允许进入本登记表。
-3. 失败实验删除代码和临时结果，只在 `ML/EXPERIMENT_LOG.md` 留结论。
-4. 当前所有新实验默认对照 `decision_realtime_v2`。
+1. 新实验必须围绕二类买卖点路线展开。
+2. 新实验必须先写 `.claude/experiments/*.md`。
+3. 实验成功后才允许进入本登记表。
+4. 失败实验删除代码和临时结果，只在 `ML/EXPERIMENT_LOG.md` 留结论。
+5. 当前所有新实验默认对照 `decision_realtime_v2`。

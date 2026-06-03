@@ -12,10 +12,11 @@ import pandas as pd
 from ML.routes.btc_futures_v1.data import DEFAULT_SOURCE_PATH, load_1m_futures_bars, parse_utc
 from ML.shared.json_utils import json_safe
 
-from .dataset import DEFAULT_BACKTEST_DIR, DEFAULT_MODEL_DIR, ROUTE_NAME
 
-
-DEFAULT_EXIT_DATASET_PATH = Path("data/btc_futures_v3_beta_edge/btc_futures_v3_beta_exit_lifecycle.parquet")
+ROUTE_NAME = "post_exit_management"
+DEFAULT_MODEL_DIR = Path("result/ml/post_exit_management")
+DEFAULT_BACKTEST_DIR = Path("result/post_exit_management")
+DEFAULT_EXIT_DATASET_PATH = Path("data/post_exit_management/post_exit_lifecycle.parquet")
 DEFAULT_EXIT_MODEL_PATH = DEFAULT_MODEL_DIR / "strict_exit_model.pkl"
 DEFAULT_MULTI_HEAD_MODEL_PATH = DEFAULT_MODEL_DIR / "multi_head_exit_model.pkl"
 DEFAULT_EXIT_BACKTEST_DIR = DEFAULT_BACKTEST_DIR / "ml_strict_exit"

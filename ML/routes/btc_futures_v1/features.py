@@ -778,11 +778,11 @@ def build_symbol_feature_dataset(
         dataset[f"asset_is_{train_asset}"] = 1.0 if normalize_symbol(train_symbol) == symbol else 0.0
 
     try:
-        from ML.routes.btc_futures_v3_alpha.dataset import enhance_btc_futures_v3_features
+        from ML.shared.structure_features import enhance_btc_futures_v3_features
 
         dataset = enhance_btc_futures_v3_features(dataset)
     except Exception as exc:
-        raise RuntimeError(f"failed to apply v3 structure feature expansion to {symbol} dataset: {exc}") from exc
+        raise RuntimeError(f"failed to apply shared structure feature expansion to {symbol} dataset: {exc}") from exc
     dataset = enhance_chan_bi_features(dataset)
     dataset = enhance_chan_zs_bsp_features(dataset)
     return _drop_label_and_outcome_columns(dataset)

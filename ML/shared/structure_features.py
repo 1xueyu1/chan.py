@@ -1,24 +1,11 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
 
-from ML.routes.btc_futures_v2_stable.dataset import (
-    DEFAULT_DATASET_PATH as V2_DATASET_PATH,
-    relabel_dataset_with_1m_path,
-)
 from ML.shared.threshold_policy import market_state_from_row
-
-
-ROUTE_NAME = "btc_futures_v3_alpha"
-DEFAULT_BASE_DATASET = V2_DATASET_PATH
-DEFAULT_DATASET_PATH = Path("data/btc_futures_v3_alpha/btc_futures_v3_alpha_dataset.parquet")
-DEFAULT_MODEL_DIR = Path("result/ml/btc_futures_v3_alpha")
-DEFAULT_BACKTEST_DIR = Path("result/btc_futures_v3_alpha")
 
 STRUCTURE_POOLS = (
     "nested_boundary",
@@ -523,73 +510,3 @@ def enhance_btc_futures_v3_features(frame: pd.DataFrame) -> pd.DataFrame:
     out[numeric_v3_cols] = out[numeric_v3_cols].replace([np.inf, -np.inf], np.nan)
     return out
 
-
-def build_btc_futures_v3_alpha_dataset(
-    base_dataset: str | Path = DEFAULT_BASE_DATASET,
-    output_path: str | Path = DEFAULT_DATASET_PATH,
-    force: bool = False,
-    ensure_base: bool = True,
-) -> pd.DataFrame:
-    output = Path(output_path)
-    if output.exists() and not force:
-        return pd.read_parquet(output)
-
-    base = Path(base_dataset)
-    if not base.exists():
-        if not ensure_base:
-            raise FileNotFoundError(f"base dataset not found: {base}")
-        relabel_dataset_with_1m_path(output_path=base, force=False)
-
-    dataset = pd.read_parquet(base)
-    for col in ("exec_time", "entry_time", "exit_time", "signal_available_time"):
-        if col in dataset.columns:
-            dataset[col] = pd.to_datetime(dataset[col], utc=True, errors="coerce")
-    dataset = dataset.dropna(subset=["label", "exec_time", "entry_time", "exit_time"]).sort_values("exec_time").reset_index(drop=True)
-    out = enhance_btc_futures_v3_features(dataset)
-    out["route"] = ROUTE_NAME
-    if not bool((out["entry_time"] >= out["exec_time"] + pd.Timedelta(minutes=15)).all()):
-        raise RuntimeError("lookahead audit failed: entry_time is earlier than closed signal bar")
-
-    output.parent.mkdir(parents=True, exist_ok=True)
-    out.to_parquet(output, index=False)
-    meta = {
-        "route": ROUTE_NAME,
-        "base_dataset": str(base),
-        "output_path": str(output),
-        "rows": int(len(out)),
-        "columns": int(len(out.columns)),
-        "v3_numeric_features": int(
-            len([col for col in out.columns if col.startswith(V3_FEATURE_PREFIX) and pd.api.types.is_numeric_dtype(out[col])])
-        ),
-        "structure_pools": {str(k): int(v) for k, v in out["v3_structure_pool"].value_counts().sort_index().items()},
-        "label_rate": float(pd.to_numeric(out["label"], errors="coerce").mean()),
-        "avg_net_return": float(pd.to_numeric(out["net_return"], errors="coerce").mean()),
-        "lookahead_check": "entry_time >= exec_time + 15min",
-    }
-    output.with_name("btc_futures_v3_alpha_dataset_meta.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    return out
-
-
-def main() -> None:
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Build BTC futures v3 alpha enhanced dataset")
-    parser.add_argument("--base-dataset", default=str(DEFAULT_BASE_DATASET))
-    parser.add_argument("--output", default=str(DEFAULT_DATASET_PATH))
-    parser.add_argument("--force", action="store_true")
-    parser.add_argument("--no-ensure-base", action="store_true")
-    args = parser.parse_args()
-    frame = build_btc_futures_v3_alpha_dataset(
-        base_dataset=args.base_dataset,
-        output_path=args.output,
-        force=bool(args.force),
-        ensure_base=not bool(args.no_ensure_base),
-    )
-    print(f"built {ROUTE_NAME} dataset rows={len(frame)} output={args.output}")
-
-
-if __name__ == "__main__":
-    main()

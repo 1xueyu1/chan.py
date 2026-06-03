@@ -50,8 +50,8 @@ class SideBspFamilyBundle:
 
     def prepare_features(self, frame: pd.DataFrame) -> pd.DataFrame:
         try:
-            from ML.routes.btc_futures_v3_alpha.dataset import enhance_btc_futures_v3_features
             from ML.routes.btc_futures_v1.features import enhance_chan_bi_features, enhance_chan_zs_bsp_features
+            from ML.shared.structure_features import enhance_btc_futures_v3_features
 
             return enhance_chan_zs_bsp_features(enhance_chan_bi_features(enhance_btc_futures_v3_features(frame)))
         except Exception:
