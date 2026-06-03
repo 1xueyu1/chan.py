@@ -2,6 +2,8 @@
 
 这条路线是在 `btc_futures_v1` 基础上继续迭代的正式分支。当前已回到 `decision_realtime_v2` 口径：保留已经验证有效的第三段确认后 15m `opposite_bsp` 出场路径，只用二级决策模型和结构风险定仓压制确认前失效风险。
 
+完整工作回顾见 [WORK_REVIEW.md](WORK_REVIEW.md)。
+
 ## 当前口径
 
 - 入场信号来自 15m 缠论二类买卖点族群。
