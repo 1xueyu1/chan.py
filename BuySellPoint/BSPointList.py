@@ -242,11 +242,30 @@ class CBSPointList(Generic[LINE_TYPE, LINE_LIST_TYPE]):
         retrace_rate = bsp2_bi.amp()/break_bi.amp()
         bsp2_flag = retrace_rate <= BSP_CONF.max_bs2_rate
         if bsp2_flag:
+            invalid_bi = bsp1_bi if bsp1_bi is not None else break_bi
+            invalid_price = invalid_bi._low() if bsp2_bi.is_down() else invalid_bi._high()
             feature_dict = {
                 'bsp2_retrace_rate': retrace_rate,
                 'bsp2_break_bi_amp': break_bi.amp(),
+                'bsp2_break_bi_low': break_bi._low(),
+                'bsp2_break_bi_high': break_bi._high(),
+                'bsp2_break_bi_end_price': break_bi.get_end_val(),
                 'bsp2_bi_amp': bsp2_bi.amp(),
+                'bsp2_invalid_price': invalid_price,
+                'bsp2_invalid_bi_idx': invalid_bi.idx,
             }
+            origin_zs_lst = seg.get_multi_bi_zs_lst() if hasattr(seg, "get_multi_bi_zs_lst") else seg.zs_lst
+            if origin_zs_lst:
+                origin_zs = origin_zs_lst[-1]
+                feature_dict.update({
+                    'bsp2_origin_zs_low': origin_zs.low,
+                    'bsp2_origin_zs_mid': origin_zs.mid,
+                    'bsp2_origin_zs_high': origin_zs.high,
+                    'bsp2_origin_zs_peak_low': origin_zs.peak_low,
+                    'bsp2_origin_zs_peak_high': origin_zs.peak_high,
+                    'bsp2_origin_zs_begin_bi_idx': origin_zs.begin_bi.idx,
+                    'bsp2_origin_zs_end_bi_idx': origin_zs.end_bi.idx,
+                })
             self.add_bs(bs_type=BSP_TYPE.T2, bi=bsp2_bi, relate_bsp1=real_bsp1, feature_dict=feature_dict)  # type: ignore
         elif BSP_CONF.bsp2s_follow_2:
             return
@@ -290,6 +309,8 @@ class CBSPointList(Generic[LINE_TYPE, LINE_LIST_TYPE]):
                 'bsp2s_break_bi_amp': break_bi.amp(),
                 'bsp2s_bi_amp': bsp2s_bi.amp(),
                 'bsp2s_lv': bias/2,
+                'bsp2s_invalid_price': break_bi._low() if bsp2s_bi.is_down() else break_bi._high(),
+                'bsp2s_invalid_bi_idx': break_bi.idx,
             }
             self.add_bs(bs_type=BSP_TYPE.T2S, bi=bsp2s_bi, relate_bsp1=real_bsp1, feature_dict=feature_dict)  # type: ignore
             bias += 2

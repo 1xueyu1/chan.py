@@ -34,8 +34,9 @@ class CSeg(Generic[LINE_TYPE]):
 
         self.bi_list: List[LINE_TYPE] = []  # 仅通过self.update_bi_list来更新
         self.reason = reason
-        self.support_trend_line = None
-        self.resistance_trend_line = None
+        self._support_trend_line = None
+        self._resistance_trend_line = None
+        self._trend_line_dirty = True
         if end_bi.idx - start_bi.idx < 2:
             self.is_sure = False
         self.check()
@@ -133,9 +134,28 @@ class CSeg(Generic[LINE_TYPE]):
         for bi_idx in range(idx1, idx2+1):
             bi_lst[bi_idx].parent_seg = self
             self.bi_list.append(bi_lst[bi_idx])
+        self._trend_line_dirty = True
+
+    def _ensure_trend_lines(self):
+        if not self._trend_line_dirty:
+            return
         if len(self.bi_list) >= 3:
-            self.support_trend_line = CTrendLine(self.bi_list, TREND_LINE_SIDE.INSIDE)
-            self.resistance_trend_line = CTrendLine(self.bi_list, TREND_LINE_SIDE.OUTSIDE)
+            self._support_trend_line = CTrendLine(self.bi_list, TREND_LINE_SIDE.INSIDE)
+            self._resistance_trend_line = CTrendLine(self.bi_list, TREND_LINE_SIDE.OUTSIDE)
+        else:
+            self._support_trend_line = None
+            self._resistance_trend_line = None
+        self._trend_line_dirty = False
+
+    @property
+    def support_trend_line(self):
+        self._ensure_trend_lines()
+        return self._support_trend_line
+
+    @property
+    def resistance_trend_line(self):
+        self._ensure_trend_lines()
+        return self._resistance_trend_line
 
     def get_first_multi_bi_zs(self):
         return next((zs for zs in self.zs_lst if not zs.is_one_bi_zs()), None)

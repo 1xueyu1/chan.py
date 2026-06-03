@@ -1,0 +1,22 @@
+[project]
+name = "chan-quant"
+version = "0.1.0"
+description = "Chan theory quantitative research, backtesting, and ML framework"
+requires-python = ">=3.11,<3.13"
+
+[tool.pytest.ini_options]
+testpaths = ["Backtest/tests", "ML/tests", "RustCore/tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::FutureWarning",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]

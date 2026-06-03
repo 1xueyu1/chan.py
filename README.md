@@ -1,44 +1,46 @@
-<p align="center">
-<img src="./Image/chan.py_image_1.svg" width="300"/>
-</p>
+# chan.py Quant Architecture
 
+本仓库当前是一个缠论量化工程：`Chan.py`/`KLine`/`Bi`/`Seg`/`ZS`/`BuySellPoint` 提供缠论计算核心，`DataAPI` 提供行情接入，`Backtest` 提供事件提取、ML 过滤、风控、执行和报告，`ML` 提供训练/特征/模型包，`RustCore` 提供可选 Rust 加速，`TradingView` 提供本地可视化适配。
+
+## 当前推荐入口
+
+### 1. 安装开发依赖
+
+```bash
+python -m pip install -r requirements-dev.txt
 ```
-             ██████╗██╗  ██╗ █████╗ ███╗   ██╗   ██████╗ ██╗   ██╗
-            ██╔════╝██║  ██║██╔══██╗████╗  ██║   ██╔══██╗╚██╗ ██╔╝
-            ██║     ███████║███████║██╔██╗ ██║   ██████╔╝ ╚████╔╝
-            ██║     ██╔══██║██╔══██║██║╚██╗██║   ██╔═══╝   ╚██╔╝
-            ╚██████╗██║  ██║██║  ██║██║ ╚████║██╗██║        ██║
-             ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝╚═╝        ╚═╝
+
+依赖按使用场景分层：只做缠论计算通常只需要 `pandas/numpy`；回测需要 `vectorbt/pyarrow`；ML 路线需要 `scikit-learn/xgboost/lightgbm`；TradingView 本地服务需要 `fastapi/uvicorn`。
+
+### 2. 运行测试
+
+```bash
+python -m pytest Backtest/tests -q
 ```
 
-<p><a href="https://github.com/Vespa314/chan.py/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/Vespa314/chan.py" /></a></p>
+### 3. 运行最小回测
 
-### Links & Documentation
+```bash
+python Backtest/examples/run_vectorbt_backtest.py --symbols BTCUSDT --begin-time 2025-01-01 --end-time 2025-01-31 --kl-type 15m --no-bars-csv
+```
 
-🎯 **快速开始**（新用户必读）：
-- [统一启动脚本快速参考卡](./QUICKSTART.md) ⭐ 从这里开始
-- [全流程产物归档与运行文档](./Debug/PIPELINE_USAGE.md) - 统一启动脚本完整说明
+### 4. 推荐模块边界
 
-📚 **详细文档**：
-- [快速上手指南](./quick_guide.md)
-- [全流程产物归档与运行文档](./Debug/PIPELINE_USAGE.md) - 全流程和币种分割详说
-- [版本备份规范](./backup/README.md)
+- `Backtest/facade.py`：未来外部调用回测的稳定入口。
+- `Backtest/types.py`：跨层数据协议，包含 `RawBSPEvent`、`ScoredSignalEvent`、`SignalMatrix`、`BacktestRunResult`。
+- `Backtest/data_contract.py`：标准 BarFrame 规范，统一 UTC 时间和 OHLCV 字段。
+- `ML/model.py` / `ML/registry.py`：模型包与 manifest 元数据。
 
-⚙️ **核心脚本**：
-- `Debug/run_pipeline.py` - 所有操作的统一启动脚本（无需创建新脚本）
-完整代码22000行左右，公开版约5300行；本README对应的是完整版(可能在某些地方使用上和公开版本代码不一致)，尽量参考[快速上手指南](./quick_guide.md)；
+## 旧文档说明
 
-如有使用疑惑，欢迎讨论/邮件联系。
+下面保留原始 `chan.py` 使用文档作为缠论核心参考。部分旧入口（例如已删除的 `Image/`、`App/`、`Debug/` 旧脚本、旧 `ml_layer/`）可能已经不再是当前推荐路径；以本 README 顶部和 [Backtest/README.md](./Backtest/README.md) 的入口为准。
 
-
-**特别说明②**：依赖最低版本为python3.11；由于本项目是高度计算密集型，鉴于python3.11发布且运算速度大幅提升，实测相比于python 3.8.5计算时间缩短约16%，故后续开发均基于python3.11；
-
-
-**特别说明③**：当前项目默认开发/测试环境为conda虚拟环境 `chan`，推荐使用解释器 `C:/Users/xueyu/anaconda3/envs/chan/python.exe` 运行所有脚本与回测；
-
+**运行环境**：建议 Python 3.11；当前项目通过 `pyproject.toml` 固定为 `>=3.11,<3.13`。
 
 ---
-# 缠论框架使用文档
+
+## 缠论框架使用文档
+
 - [缠论框架使用文档](#缠论框架使用文档)
   - [功能介绍](#功能介绍)
     - [1. 缠论基本元素计算](#1-缠论基本元素计算)

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chan Backtest Explorer</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Chan ML 回测记录</p>
+        <h1>Backtest Explorer</h1>
+      </div>
+      <div class="top-actions">
+        <label class="run-picker">
+          <span>当前记录</span>
+          <select id="run-select"></select>
+        </label>
+        <div class="generated" id="generated-at"></div>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar">
+        <div class="sidebar-head">
+          <label class="search-box">
+            <span>筛选</span>
+            <input id="run-search" type="search" placeholder="路线 / 参数 / 路径">
+          </label>
+          <select id="sort-select" aria-label="排序">
+            <option value="return">按收益</option>
+            <option value="drawdown">按回撤</option>
+            <option value="trades">按交易数</option>
+            <option value="time">按时间</option>
+          </select>
+        </div>
+        <div class="run-list" id="run-list"></div>
+      </aside>
+
+      <section class="workspace">
+        <section class="metric-strip" id="metric-strip"></section>
+
+        <section class="split">
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>币种收益排行</h2>
+                <p id="symbol-count"></p>
+              </div>
+              <label class="compact-field">
+                <span>币种</span>
+                <select id="symbol-select"></select>
+              </label>
+            </div>
+            <div class="rank-table-wrap">
+              <table class="rank-table" id="symbol-table"></table>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h2 id="symbol-title">币种详情</h2>
+                <p id="symbol-subtitle"></p>
+              </div>
+            </div>
+            <div class="symbol-summary" id="symbol-summary"></div>
+            <div class="year-bars" id="year-bars"></div>
+          </div>
+        </section>
+
+        <section class="panel period-panel">
+          <div class="panel-head">
+            <div>
+              <h2>分周期收益</h2>
+              <p>按当前回测记录和币种查看日 / 周 / 月 / 年表现</p>
+            </div>
+            <div class="tabs" role="tablist" aria-label="收益周期">
+              <button class="tab active" data-period="monthly" type="button">月</button>
+              <button class="tab" data-period="weekly" type="button">周</button>
+              <button class="tab" data-period="daily" type="button">日</button>
+              <button class="tab" data-period="yearly" type="button">年</button>
+            </div>
+          </div>
+          <div class="period-chart" id="period-chart"></div>
+          <div class="period-table-wrap">
+            <table class="period-table" id="period-table"></table>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <script src="./data.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>

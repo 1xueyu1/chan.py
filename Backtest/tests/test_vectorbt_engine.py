@@ -1,4 +1,4 @@
-import pandas as pd
+﻿import pandas as pd
 import pytest
 
 from Backtest.config import BacktestConfig
@@ -58,7 +58,7 @@ def test_vectorbt_engine_runs_minimal_case():
         execution_mode="next_bar_open",
     )
 
-    _pf, metrics, equity, dd = run_vectorbt_for_symbol(cfg, bars, matrix)
+    _pf, metrics, equity, dd, trades = run_vectorbt_for_symbol(cfg, bars, matrix)
 
     assert isinstance(metrics, dict)
     assert len(equity) == len(bars)

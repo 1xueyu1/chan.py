@@ -24,6 +24,16 @@ from Common.func_util import check_kltype_order, kltype_lte_day
 from DataAPI.CommonStockAPI import CCommonStockApi
 from KLine.KLine_List import CKLine_List
 from KLine.KLine_Unit import CKLine_Unit
+from RustCore import (
+    RustChanEngine,
+    RustCoreUnavailable,
+    RustMultiChanEngine,
+    RustStepSnapshot,
+    freq_from_kl_type,
+    freq_seconds,
+    freqs_from_lv_list,
+    rust_config_path_from_chan_config,
+)
 
 
 class CChan:
@@ -67,12 +77,16 @@ class CChan:
         self.kl_inconsistent_detail = defaultdict(list)
 
         self.g_kl_iter = defaultdict(list)
+        self.rust_engine = None
 
         self.do_init()
 
         if not config.trigger_step:
-            for _ in self.load():
-                ...
+            if self.conf.use_rust_core:
+                self.load_rust_core()
+            else:
+                for _ in self.load():
+                    ...
 
     def __deepcopy__(self, memo):
         cls = self.__class__
@@ -92,6 +106,7 @@ class CChan:
             obj.klu_cache = copy.deepcopy(self.klu_cache, memo)
         if hasattr(self, 'klu_last_t'):
             obj.klu_last_t = copy.deepcopy(self.klu_last_t, memo)
+        obj.rust_engine = self.rust_engine
         obj.kl_datas = {}
         for kl_type, ckline in self.kl_datas.items():
             obj.kl_datas[kl_type] = copy.deepcopy(ckline, memo)
@@ -119,6 +134,37 @@ class CChan:
             klu.set_idx(KLU_IDX)
             klu.kl_type = lv
             yield klu
+
+    def load_rust_core(self):
+        freqs = freqs_from_lv_list(self.lv_list)
+        base_pos = min(range(len(self.lv_list)), key=lambda idx: freq_seconds(freqs[idx]))
+        base_lv = self.lv_list[base_pos]
+        base_freq = freqs[base_pos]
+        rust_config_path = rust_config_path_from_chan_config(self.conf)
+        stockapi_cls = self.GetStockAPI()
+        try:
+            stockapi_cls.do_init()
+            klu_iter = self.get_load_stock_iter(stockapi_cls, base_lv)
+            if len(self.lv_list) == 1:
+                self.rust_engine = RustChanEngine(
+                    freq=base_freq,
+                    config_path=rust_config_path,
+                )
+            else:
+                self.rust_engine = RustMultiChanEngine(
+                    freqs=freqs,
+                    base_freq=base_freq,
+                    config_path=rust_config_path,
+                )
+            pushed = self.rust_engine.push_klus_chunked(klu_iter)
+        except RustCoreUnavailable as e:
+            raise CChanException(str(e), ErrCode.COMMON_ERROR)
+        finally:
+            stockapi_cls.do_close()
+
+        if pushed == 0:
+            raise CChanException("rust core did not receive any K line data", ErrCode.NO_DATA)
+        return self.rust_engine
 
     def get_load_stock_iter(self, stockapi_cls, lv):
         """构建并返回指定级别的数据迭代器（封装数据源实例）。"""
@@ -156,6 +202,9 @@ class CChan:
         返回生成器，按触发步长逐次产出 `self`（或快照）。
         """
         assert self.conf.trigger_step
+        if self.conf.use_rust_core:
+            yield from self.step_load_rust_core()
+            return
         self.do_init()  # 清空数据，防止再次重跑没有数据
         yielded = False  # 是否曾经返回过结果
         for idx, snapshot in enumerate(self.load(self.conf.trigger_step)):
@@ -166,11 +215,73 @@ class CChan:
         if not yielded:
             yield self
 
+    def step_load_rust_core(self):
+        freqs = freqs_from_lv_list(self.lv_list)
+        base_pos = min(range(len(self.lv_list)), key=lambda idx: freq_seconds(freqs[idx]))
+        base_lv = self.lv_list[base_pos]
+        base_freq = freqs[base_pos]
+        rust_config_path = rust_config_path_from_chan_config(self.conf)
+        stockapi_cls = self.GetStockAPI()
+        yielded = False
+        try:
+            stockapi_cls.do_init()
+            klu_iter = self.get_load_stock_iter(stockapi_cls, base_lv)
+            if len(self.lv_list) == 1:
+                self.rust_engine = RustChanEngine(
+                    freq=base_freq,
+                    config_path=rust_config_path,
+                )
+            else:
+                self.rust_engine = RustMultiChanEngine(
+                    freqs=freqs,
+                    base_freq=base_freq,
+                    config_path=rust_config_path,
+                )
+            for idx, klu in enumerate(klu_iter):
+                self.rust_engine.push_klu_step(klu)
+                if idx < self.conf.skip_step:
+                    continue
+                yielded = True
+                yield RustStepSnapshot(self.rust_engine, self.lv_list, klu, base_lv)
+        except RustCoreUnavailable as e:
+            raise CChanException(str(e), ErrCode.COMMON_ERROR)
+        finally:
+            stockapi_cls.do_close()
+        if not yielded:
+            yield self
+
     def trigger_load(self, inp):
         """接受外部触发数据 (字典形式)，将其注入引擎并推进计算流程。
 
         输入 `inp` 格式为 {lv: [CKLine_Unit, ...]}。
         """
+        if self.conf.use_rust_core:
+            freqs = freqs_from_lv_list(self.lv_list)
+            base_pos = min(range(len(self.lv_list)), key=lambda idx: freq_seconds(freqs[idx]))
+            base_lv = self.lv_list[base_pos]
+            base_freq = freqs[base_pos]
+            rust_config_path = rust_config_path_from_chan_config(self.conf)
+            if base_lv not in inp:
+                raise CChanException(f"rust core input missing base level {base_lv}", ErrCode.NO_DATA)
+            for idx, klu in enumerate(inp[base_lv]):
+                klu.set_idx(idx)
+                klu.kl_type = base_lv
+            if len(self.lv_list) == 1:
+                self.rust_engine = RustChanEngine(
+                    freq=base_freq,
+                    config_path=rust_config_path,
+                )
+            else:
+                self.rust_engine = RustMultiChanEngine(
+                    freqs=freqs,
+                    base_freq=base_freq,
+                    config_path=rust_config_path,
+                )
+            pushed = self.rust_engine.push_klus_chunked(inp[base_lv])
+            if pushed == 0:
+                raise CChanException("rust core did not receive any K line data", ErrCode.NO_DATA)
+            return self
+
         # {type: [klu, ...]}
         if not hasattr(self, 'klu_cache'):
             self.klu_cache: List[Optional[CKLine_Unit]] = [None for _ in self.lv_list]
@@ -357,6 +468,10 @@ class CChan:
 
     def get_bsp(self, idx=None) -> List[CBS_Point]:
         """已废弃：获取历史 BSP 列表（保持兼容）。"""
+        if self.rust_engine is not None:
+            if isinstance(self.rust_engine, RustMultiChanEngine):
+                return self.rust_engine.bi_bsp(self._rust_freq_for_query(idx), latest_first=False)
+            return self.rust_engine.bi_bsp(latest_first=False)
         print('[deprecated] use get_latest_bsp instead')
         if idx is not None:
             return self[idx].bs_point_lst.getSortedBspList()
@@ -365,10 +480,52 @@ class CChan:
 
     def get_latest_bsp(self, idx=None, number=1) -> List[CBS_Point]:
         """获取最新的 BSP（交易信号点）列表；`number=0` 表示全部。"""
+        if self.rust_engine is not None:
+            if isinstance(self.rust_engine, RustMultiChanEngine):
+                bsp = self.rust_engine.bi_bsp(self._rust_freq_for_query(idx), latest_first=True)
+            else:
+                bsp = self.rust_engine.bi_bsp(latest_first=True)
+            return bsp if number == 0 else bsp[:number]
         if idx is not None:
             return self[idx].bs_point_lst.get_latest_bsp(number)
         assert len(self.lv_list) == 1
         return self[0].bs_point_lst.get_latest_bsp(number)
+
+    def _rust_freq_for_query(self, idx=None) -> str:
+        if idx is None:
+            if len(self.lv_list) != 1:
+                raise CChanException("rust core multi-level query requires idx or KL_TYPE", ErrCode.PARA_ERROR)
+            lv = self.lv_list[0]
+        elif isinstance(idx, KL_TYPE):
+            lv = idx
+        elif isinstance(idx, int):
+            lv = self.lv_list[idx]
+        else:
+            raise CChanException("unsupported rust core query type", ErrCode.COMMON_ERROR)
+        return freq_from_kl_type(lv)
+
+    def get_rust_counts(self, idx=None) -> dict:
+        if self.rust_engine is None:
+            raise CChanException("rust core is not enabled for this CChan instance", ErrCode.PARA_ERROR)
+        if isinstance(self.rust_engine, RustMultiChanEngine):
+            if idx is None:
+                return self.rust_engine.counts()
+            return self.rust_engine.counts(self._rust_freq_for_query(idx))
+        return self.rust_engine.counts()
+
+    def get_rust_snapshot(self, idx=None) -> dict:
+        if self.rust_engine is None:
+            raise CChanException("rust core is not enabled for this CChan instance", ErrCode.PARA_ERROR)
+        if isinstance(self.rust_engine, RustMultiChanEngine):
+            return self.rust_engine.snapshot(self._rust_freq_for_query(idx))
+        return self.rust_engine.snapshot()
+
+    def get_rust_seg_bsp(self, idx=None, latest_first=True) -> list:
+        if self.rust_engine is None:
+            raise CChanException("rust core is not enabled for this CChan instance", ErrCode.PARA_ERROR)
+        if isinstance(self.rust_engine, RustMultiChanEngine):
+            return self.rust_engine.seg_bsp(self._rust_freq_for_query(idx), latest_first=latest_first)
+        return self.rust_engine.seg_bsp(latest_first=latest_first)
 
     def chan_dump_pickle(self, file_path):
         """将当前 `CChan` 对象序列化到文件（pickle），并在保存前清理循环引用。"""

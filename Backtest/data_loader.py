@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 from pathlib import Path
 from threading import Lock
 from typing import Dict, Optional, Tuple
@@ -11,6 +10,8 @@ import pandas as pd
 
 from Common.CEnum import KL_TYPE
 from .config import BacktestConfig
+from .data_contract import normalize_bars
+from .time_utils import parse_time_bound
 
 
 REQUIRED_COLUMNS = ["open_time", "open", "high", "low", "close", "volume"]
@@ -43,28 +44,6 @@ FALLBACK_INTERVAL = "5m"
 
 _BARS_CACHE_LOCK = Lock()
 _BARS_CACHE: "OrderedDict[tuple, pd.DataFrame]" = OrderedDict()
-
-
-def _parse_bound(value: Optional[str], is_end: bool) -> Optional[pd.Timestamp]:
-    if not value:
-        return None
-
-    text = str(value).replace("/", "-").strip()
-    dt = None
-    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
-        try:
-            dt = datetime.strptime(text, fmt)
-            break
-        except ValueError:
-            continue
-
-    if dt is None:
-        raise ValueError(f"Unable to parse datetime bound: {value}")
-
-    if len(text) == 10 and is_end:
-        dt = dt.replace(hour=23, minute=59, second=59)
-
-    return pd.Timestamp(dt, tz="UTC")
 
 
 def _normalize_symbol(symbol: str) -> str:
@@ -152,6 +131,32 @@ def _resample_if_needed(df: pd.DataFrame, kl_type: KL_TYPE, need_resample: bool)
     )
 
 
+def _warmup_delta(kl_type: KL_TYPE, bars: int) -> pd.Timedelta:
+    if bars <= 0:
+        return pd.Timedelta(0)
+    if kl_type == KL_TYPE.K_1M:
+        return pd.Timedelta(minutes=bars)
+    if kl_type == KL_TYPE.K_3M:
+        return pd.Timedelta(minutes=3 * bars)
+    if kl_type == KL_TYPE.K_5M:
+        return pd.Timedelta(minutes=5 * bars)
+    if kl_type == KL_TYPE.K_10M:
+        return pd.Timedelta(minutes=10 * bars)
+    if kl_type == KL_TYPE.K_15M:
+        return pd.Timedelta(minutes=15 * bars)
+    if kl_type == KL_TYPE.K_30M:
+        return pd.Timedelta(minutes=30 * bars)
+    if kl_type == KL_TYPE.K_60M:
+        return pd.Timedelta(hours=bars)
+    if kl_type == KL_TYPE.K_DAY:
+        return pd.Timedelta(days=bars)
+    if kl_type == KL_TYPE.K_WEEK:
+        return pd.Timedelta(weeks=bars)
+    if kl_type == KL_TYPE.K_MON:
+        return pd.Timedelta(days=30 * bars)
+    return pd.Timedelta(minutes=15 * bars)
+
+
 def load_symbol_bars(config: BacktestConfig, symbol: str) -> pd.DataFrame:
     project_root = Path(__file__).resolve().parents[1]
     data_dir = project_root / "data"
@@ -170,35 +175,27 @@ def load_symbol_bars(config: BacktestConfig, symbol: str) -> pd.DataFrame:
         raise ValueError(f"Parquet missing required columns {missing}: {source_path}")
 
     df = df[REQUIRED_COLUMNS].copy()
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-    for col in REQUIRED_COLUMNS[1:]:
-        if not pd.api.types.is_numeric_dtype(df[col]):
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+    bars = normalize_bars(df)
 
-    df = df.dropna(subset=["open_time", "open", "high", "low", "close"])
+    if need_resample:
+        resample_input = bars.reset_index().rename(columns={"time": "open_time"})
+        bars = normalize_bars(
+            _resample_if_needed(resample_input, config.kl_type, True)
+        )
 
-    open_time = df["open_time"]
-    if not open_time.is_monotonic_increasing:
-        df = df.sort_values("open_time")
-        open_time = df["open_time"]
-    if not open_time.is_unique:
-        df = df.drop_duplicates(subset=["open_time"])
-
-    df = df.reset_index(drop=True)
-
-    df = _resample_if_needed(df, config.kl_type, need_resample)
-
-    begin_ts = _parse_bound(config.begin_time, is_end=False)
-    end_ts = _parse_bound(config.end_time, is_end=True)
+    begin_ts = parse_time_bound(config.begin_time, is_end=False)
+    end_ts = parse_time_bound(config.end_time, is_end=True)
+    if begin_ts is not None and bool(getattr(config, "preload_bars", False)):
+        warmup_bars = int(getattr(config, "signal_warmup_bars", 0) or 0)
+        if warmup_bars > 0:
+            begin_ts = begin_ts - _warmup_delta(config.kl_type, warmup_bars)
     if begin_ts is not None:
-        df = df[df["open_time"] >= begin_ts]
+        bars = bars[bars.index >= begin_ts]
     if end_ts is not None:
-        df = df[df["open_time"] <= end_ts]
+        bars = bars[bars.index <= end_ts]
 
-    out = df.set_index("open_time")[["open", "high", "low", "close", "volume"]].copy()
-    out.index.name = "time"
-    _cache_put(key, out, max_cache_size)
-    return out
+    _cache_put(key, bars, max_cache_size)
+    return bars
 
 
 def load_multi_symbol_bars(config: BacktestConfig) -> Dict[str, pd.DataFrame]:

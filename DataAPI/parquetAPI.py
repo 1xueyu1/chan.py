@@ -3,6 +3,7 @@ from datetime import datetime
 
 import pandas as pd
 
+from Backtest.data_contract import normalize_bars
 from Common.CEnum import AUTYPE, DATA_FIELD, KL_TYPE
 from Common.ChanException import CChanException, ErrCode
 from Common.CTime import CTime
@@ -85,20 +86,13 @@ class PARQUET_API(CCommonStockApi):
                 ErrCode.SRC_DATA_FORMAT_ERROR,
             )
 
-        df = df[self.REQUIRED_COLUMNS].copy()
-        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-        for col in self.REQUIRED_COLUMNS[1:]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-        df = (
-            df.dropna(subset=["open_time", "open", "high", "low", "close"])
-            .drop_duplicates(subset=["open_time"])
-            .sort_values("open_time")
-            .reset_index(drop=True)
-        )
+        bars = normalize_bars(df[self.REQUIRED_COLUMNS].copy())
+        df = bars.reset_index().rename(columns={"time": "open_time"})
 
         if need_resample:
             df = self._resample_from_fallback(df)
+            bars = normalize_bars(df)
+            df = bars.reset_index().rename(columns={"time": "open_time"})
 
         begin_ts = self._parse_bound(self.begin_date, is_end=False)
         end_ts = self._parse_bound(self.end_date, is_end=True)

@@ -1,4 +1,4 @@
-# Plot/factory.py
+﻿# Plot/factory.py
 
 from .config import DEFAULT_ENGINE
 

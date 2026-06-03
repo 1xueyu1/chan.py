@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import sys
@@ -23,16 +23,18 @@ def main() -> None:
 
     if result.artifacts:
         print("Artifacts:")
-        print(f"  events:  {result.artifacts.events_csv}")
-        print(f"  bars:    {result.artifacts.bars_csv}")
-        print(f"  metrics: {result.artifacts.metrics_json}")
-        print(f"  report:  {result.artifacts.report_html}")
-        if result.artifacts.report_detail_html is not None:
-            print(f"  report_detail:  {result.artifacts.report_detail_html}")
+        if result.artifacts.events_csv is not None:
+            print(f"  events:  {result.artifacts.events_csv}")
+        if result.artifacts.bars_csv is not None:
+            print(f"  bars:    {result.artifacts.bars_csv}")
+        if result.artifacts.metrics_json is not None:
+            print(f"  metrics: {result.artifacts.metrics_json}")
+        if result.artifacts.report_html is not None:
+            print(f"  report:  {result.artifacts.report_html}")
         if result.artifacts.trades_csv is not None:
-            print(f"  trades_csv:  {result.artifacts.trades_csv}")
+            print(f"  trades:  {result.artifacts.trades_csv}")
         if result.artifacts.equity_csv is not None:
-            print(f"  equity_csv:  {result.artifacts.equity_csv}")
+            print(f"  equity:  {result.artifacts.equity_csv}")
 
 
 if __name__ == "__main__":

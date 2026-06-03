@@ -67,6 +67,9 @@ class CChanConfig:
         # - 含义: 若为 True，则在满足触发条件时以更细粒度的 step 进行处理，主要用于调试或逐步回放逻辑。
         # - 默认: False
         self.trigger_step = conf.get("trigger_step", False)
+        self.use_rust_core = conf.get("use_rust_core", False)
+        self.rust_core_config_path = conf.get("rust_core_config_path", None)
+        self.mtf_chan_features = conf.get("mtf_chan_features", True)
 
         # 跳过的 step 数量（整数）：用于在回放或处理时跳过前 N 步。
         # - 类型: int

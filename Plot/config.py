@@ -1,2 +1,1 @@
-DEFAULT_ENGINE = "plotly"
-
+﻿DEFAULT_ENGINE = "plotly"

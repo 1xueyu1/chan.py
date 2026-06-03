@@ -1,0 +1,28 @@
+# Core data stack
+numpy
+pandas
+pyarrow
+
+# Backtest/runtime
+vectorbt
+plotly
+matplotlib
+
+# Machine learning (optional for ML-enabled runs)
+scikit-learn
+xgboost
+lightgbm
+
+# Data sources (optional; install only for the sources you use)
+ccxt
+akshare
+baostock
+
+# TradingView local adapter (optional UI/API)
+fastapi
+uvicorn
+pydantic
+
+# Test/dev
+pytest
+ruff

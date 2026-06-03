@@ -80,7 +80,7 @@ if __name__ == "__main__":
     # 根据是否为动图模式选择静态或动画绘制
     if not config.trigger_step:
         plot_driver = CPlotDriver(chan, plot_config=plot_config, plot_para=plot_para)
-        plot_driver.figure.show()          # 在交互环境显示
-        plot_driver.save2img("./result/test.png")
+        plot_driver.show()          # 在交互环境显示
+        plot_driver.save2img("./result/test.html")
     else:
         CAnimateDriver(chan, plot_config=plot_config, plot_para=plot_para)

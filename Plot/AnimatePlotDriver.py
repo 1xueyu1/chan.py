@@ -56,9 +56,14 @@ class CAnimateDriver:
                     chan, plot_config, plot_para,
                 )
                 clear_output(wait=True)
-                display(HTML(
-                    driver.figure.to_html(
-                        full_html=False,
-                        include_plotlyjs="cdn",
-                    )
-                ))
+                if hasattr(driver.figure, "to_html"):
+                    try:
+                        html_text = driver.figure.to_html(
+                            full_html=False,
+                            include_plotlyjs="cdn",
+                        )
+                    except TypeError:
+                        html_text = driver.figure.to_html()
+                else:
+                    html_text = driver.to_html()
+                display(HTML(html_text))

@@ -80,19 +80,27 @@ def run_vectorbt_for_symbol(
         init_cash=config.initial_cash,
         fees=config.fee,
         slippage=config.slippage,
-        size=1.0,
+        size=signal_matrix.size if signal_matrix.size is not None else config.position_size,
         size_type="percent",
         freq=freq,
     )
+    if config.trade_exit_mode == "fixed_tp_sl":
+        kwargs.update(
+            sl_stop=float(config.fixed_stop_loss_pct),
+            tp_stop=float(config.fixed_take_profit_pct),
+        )
 
     if config.allow_short:
-        pf = vbt.Portfolio.from_signals(
+        call_kwargs = dict(
             entries=signal_matrix.long_entries,
             exits=signal_matrix.long_exits,
             short_entries=signal_matrix.short_entries,
             short_exits=signal_matrix.short_exits,
             **kwargs,
         )
+        if config.trade_exit_mode == "fixed_tp_sl":
+            call_kwargs["upon_opposite_entry"] = "ignore"
+        pf = vbt.Portfolio.from_signals(**call_kwargs)
     else:
         pf = vbt.Portfolio.from_signals(
             entries=signal_matrix.long_entries,
