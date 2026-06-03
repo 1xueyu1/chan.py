@@ -13,6 +13,7 @@
 | 文档 | 用途 |
 |---|---|
 | `ML/MODEL_REGISTRY.md` | 当前保留模型登记 |
+| `ML/MODEL_INVENTORY.md` | 项目内所有模型路线、数据集和结果的全量盘点 |
 | `ML/BASELINE.md` | `decision_realtime_v2` 基准指标 |
 | `ML/EXPERIMENT_LOG.md` | 正式实验记录 |
 | `.claude/spec.md` | 项目级 spec 和主线约束 |

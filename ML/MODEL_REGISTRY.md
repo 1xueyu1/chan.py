@@ -1,37 +1,24 @@
 # 模型登记表
 
-当前只保留两条有效路线：一个基准路线，一个正在迭代的二类买卖点族群路线。旧的 `capability_v3`、`capability_v4`、`capability_v5`、`confidence_branch`、`taxonomy_v1`、`hybrid_v1` 等实验路线已从当前登记中删除。
+本文件只登记当前仍有管理意义的模型路线。完整盘点见 [MODEL_INVENTORY.md](MODEL_INVENTORY.md)。
 
-| 路线 | 目标 | 信号范围 | 主标签 | 出场 | 状态 |
+## 当前正式状态
+
+| 路线 | 类型 | 信号范围 | 主标签 | 出场/决策 | 状态 |
 |---|---|---|---|---|---|
-| `btc_futures_v1` | 主线基准 | 标准二买/二卖 | `label_bsp2_valid` | 第三段兑现后等待反向买卖点，含结构保护 | 保留基准 |
-| `btc_futures_v2_bsp2_family` | 提高交易频率并区分二类结构质量 | 二类买卖点族群 | `label_bsp2_family_valid` | `family_realtime` 实时状态机 | 当前正式迭代主线 |
+| `btc_futures_v2_bsp2_family` | 当前正式主线 | 15m 二类买卖点族群 | `label_bsp2_family_valid` | `family_realtime` + 二级决策模型 + 结构风险定仓 | 正式基准：`decision_realtime_v2` |
+| `btc_futures_v1` | 保留基准 | 标准二买/二卖 | `label_bsp2_chan_entry_quality` | 第三段确认后等待反向买卖点，含结构保护 | 历史基准，仅用于对照 |
 
-## btc_futures_v1
-
-`btc_futures_v1` 是较保守的基准路线，主要关注标准二类买卖点。它用于对照后续改造是否真的提升了结构识别能力。
-
-## btc_futures_v2_bsp2_family
-
-`btc_futures_v2_bsp2_family` 是当前正式迭代路线，当前已回到 `decision_realtime_v2` 版本。
-
-核心设计：
-
-- 把标准二买/二卖扩展为二类买卖点族群。
-- 保留高频交易候选，不再使用旧模型概率做硬过滤。
-- 新增二级决策模型，学习结构身份、确认前失效风险、后续实时路径。
-- 回测和实盘决策使用 `family_realtime` 实时状态机，不直接读取未来标签。
-- 通过结构风险定仓处理低质量信号，而不是直接删除信号。
-- 保留第三段确认后的 15m 同级别 `opposite_bsp` 出场路径。
-- 已彻底删除 `taxonomy_v1` 和 `hybrid_v1` 的分类/出场改造。
-
-当前推荐结果位于：
+## 当前基准
 
 ```text
-result/btc_futures_v2_bsp2_family_wf_decision_realtime_v2
+基准版本：decision_realtime_v2
+模型路线：btc_futures_v2_bsp2_family
+结果目录：result/btc_futures_v2_bsp2_family_wf_decision_realtime_v2
+模型目录：result/ml/btc_futures_v2_bsp2_family_wf_decision_realtime_v2
 ```
 
-最新 walk-forward 汇总：
+最新 walk-forward：
 
 | 年份 | 交易数 | 胜率 | 收益 | PF | 最大回撤 |
 |---:|---:|---:|---:|---:|---:|
@@ -50,7 +37,20 @@ result/btc_futures_v2_bsp2_family_wf_decision_realtime_v2
 最差年度回撤：-12.13%
 ```
 
-主要风险点：
+## 已下线或不作为当前主线的路线
 
-- `realtime_invalid_before_confirm` 仍是最大亏损来源。
-- 后续优化应只针对确认前失效和弱确认亏损，不再改动第三段确认后的盈利出场路径。
+| 路线 | 当前处理 |
+|---|---|
+| `btc_futures_v2_stable` | 代码和数据保留，因交易频率极低，不作为当前主线 |
+| `btc_futures_v3_alpha` | 代码和数据保留，严格过滤后 2026 无交易，不作为当前主线 |
+| `btc_futures_v3_beta_edge` | 代码和数据保留，属于旧 1:1 标签/阈值路线，不作为当前主线 |
+| `taxonomy_v1` | 已删除 |
+| `hybrid_v1` | 已删除 |
+| `capability_v3` / `capability_v4` / `capability_v5` / `confidence_branch` | 已从当前登记删除 |
+
+## 后续规则
+
+1. 新实验必须先写 `.claude/experiments/*.md`。
+2. 实验成功后才允许进入本登记表。
+3. 失败实验删除代码和临时结果，只在 `ML/EXPERIMENT_LOG.md` 留结论。
+4. 当前所有新实验默认对照 `decision_realtime_v2`。
